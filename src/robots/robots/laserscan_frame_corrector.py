@@ -16,13 +16,16 @@ class LaserScanFrameCorrector(Node):
         self.declare_parameter("output_topic", "scan_new")
         self.declare_parameter("input_frame", "rplidar_link")
         self.declare_parameter("output_frame", "rplidar_link")
+        # Stamp scan with this node's clock ("now") so TF lookup matches odom->base_link (also "now").
+        # Use when robot and laptop clocks differ (avoids circle artifact from timestamp mismatch).
+        self.declare_parameter("use_receive_time", True)
 
         # Get parameters
         namespace = self.get_parameter("namespace").value
-        input_topic = self.get_parameter("input_topic").value
-        output_topic = self.get_parameter("output_topic").value
         self.input_frame = self.get_parameter("input_frame").value
         self.output_frame = f"{namespace}/{self.get_parameter('output_frame').value}"
+        self.use_receive_time = self.get_parameter("use_receive_time").value
+
         # TurtleBot4 may use base_scan or laser_frame; accept all and normalize to our TF frame
         self._accepted_frames = {
             self.input_frame,
@@ -32,42 +35,35 @@ class LaserScanFrameCorrector(Node):
         }
         self._warned_frames = set()
 
-        # High-performance QoS for real-time sensor data
         qos_profile = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             durability=QoSDurabilityPolicy.VOLATILE,
             depth=1,
         )
 
-        # CORRECTED: Use relative topic names (no leading slash)
-        # When node is in namespace 'Basin', 'scan' becomes 'Basin/scan'
-        # When node is in namespace 'Moon', 'scan' becomes 'Moon/scan'
-
         self.subscription = self.create_subscription(
             LaserScan,
-            "scan",  # CORRECTED: Relative topic - no slash
+            "scan",
             self.scan_callback,
             qos_profile,
         )
-
         self.publisher = self.create_publisher(
-            LaserScan, "scan_new", qos_profile  # CORRECTED: Relative topic - no slash
+            LaserScan, "scan_new", qos_profile
         )
 
         self.get_logger().info(
             f"LaserScan frame corrector started for namespace: {namespace}"
         )
-        self.get_logger().info(f"Subscribing to: scan (will be {namespace}/scan)")
-        self.get_logger().info(
-            f"Publishing to: scan_new (will be {namespace}/scan_new)"
-        )
         self.get_logger().info(
             f"Converting frame: {self.input_frame} -> {self.output_frame}"
         )
+        if self.use_receive_time:
+            self.get_logger().info(
+                "Scan stamp = receive time (laptop clock) so TF lookup matches odom TF."
+            )
 
     def scan_callback(self, msg):
-        # Always set frame_id to our TF frame so costmap/RViz can transform correctly.
-        # Driver may send rplidar_link, base_scan, or laser_frame; our TF has Moon/rplidar_link.
+        # Set frame_id to our TF frame so costmap/RViz can transform correctly.
         incoming = msg.header.frame_id
         if incoming != self.output_frame:
             if incoming not in self._accepted_frames and incoming not in self._warned_frames:
@@ -77,7 +73,9 @@ class LaserScanFrameCorrector(Node):
                 )
             msg.header.frame_id = self.output_frame
 
-        # Keep original stamp so TF lookup uses correct time (no "speed circles").
+        # Use this node's clock so scan and odom->base_link TF share the same time base (fixes circle when robot/laptop clocks differ).
+        if self.use_receive_time:
+            msg.header.stamp = self.get_clock().now().to_msg()
 
         self.publisher.publish(msg)
 

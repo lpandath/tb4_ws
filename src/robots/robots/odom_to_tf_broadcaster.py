@@ -88,9 +88,9 @@ class OdomToTFBroadcaster(Node):
         self._send_odom_tf(self.last_pose, self.last_odom_stamp)
 
     def _send_odom_tf(self, pose, stamp):
-        """Publish a single odom->base_link transform using CURRENT time."""
+        """Publish odom->base_link. Use 'now' so TF matches scan stamped with receive time (same time base)."""
         t = TransformStamped()
-        t.header.stamp = self.get_clock().now().to_msg()  # Use current time, not old stamp
+        t.header.stamp = self.get_clock().now().to_msg()
         t.header.frame_id = f"{self.namespace}/odom" if self.namespace else "odom"
         t.child_frame_id = (
             f"{self.namespace}/base_link" if self.namespace else "base_link"
