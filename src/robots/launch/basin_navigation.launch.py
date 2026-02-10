@@ -50,7 +50,7 @@ def generate_launch_description():
         output="screen",
         parameters=[params_file],
         remappings=[
-            ("cmd_vel", "cmd_vel"),
+            ("cmd_vel", "cmd_vel_unstamped"),  # TurtleBot4 subscribes to cmd_vel_unstamped
             ("odom", "odom"),
             ("tf", "/tf"),
             ("tf_static", "/tf_static"),

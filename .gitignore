@@ -1,0 +1,21 @@
+# Colcon / ROS 2
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.eggs/
+*.egg-info/
+*.egg
+
+# IDE / OS
+.DS_Store
+__MACOSX/
+.idea/
+.vscode/
+*.swp
+*.swo

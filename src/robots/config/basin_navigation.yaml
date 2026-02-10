@@ -23,6 +23,7 @@ Basin:
       use_sim_time: false
       controller_frequency: 10.0
       use_stamped_cmd_vel: false
+      # cmd_vel remapped to cmd_vel_unstamped in launch file (TurtleBot4)
       global_frame: Basin/odom
       robot_base_frame: Basin/base_link
       odom_frame: Basin/odom
@@ -51,6 +52,12 @@ Basin:
         debug_trajectory_details: false
         publish_evaluation: false
         publish_cost_grid_pc: false
+        publish_trajectories: false
+        min_vel_x: 0.0
+        min_vel_y: 0.0
+        max_vel_x: 0.4
+        max_vel_y: 0.0
+        max_vel_theta: 1.0
         min_speed_xy: 0.0
         max_speed_xy: 0.5
         min_speed_theta: 0.0
@@ -66,7 +73,7 @@ Basin:
         sim_time: 1.5
         linear_granularity: 0.1
         angular_granularity: 0.1
-        transform_tolerance: 3.0
+        transform_tolerance: 1.5
         xy_goal_tolerance: 0.10
         trans_stopped_velocity: 0.25
         short_circuit_trajectory_evaluation: true
@@ -90,8 +97,8 @@ Basin:
         publish_frequency: 4.0
         global_frame: Basin/odom
         robot_base_frame: Basin/base_link
-        use_sim_time: true
-        transform_tolerance: 3.0
+        use_sim_time: false
+        transform_tolerance: 1.5
         rolling_window: true
         width: 6
         height: 6
@@ -106,6 +113,7 @@ Basin:
           observation_sources: scan
           scan:
             topic: scan_new
+            sensor_frame: Basin/rplidar_link
             max_obstacle_height: 2.0
             clearing: true
             marking: true
@@ -117,7 +125,7 @@ Basin:
         inflation_layer:
           plugin: nav2_costmap_2d::InflationLayer
           cost_scaling_factor: 3.0
-          inflation_radius: 0.8
+          inflation_radius: 0.55
         always_send_full_costmap: true
 
   global_costmap:
@@ -127,8 +135,8 @@ Basin:
         publish_frequency: 2.0
         global_frame: Basin/map
         robot_base_frame: Basin/base_link
-        use_sim_time: true
-        transform_tolerance: 3.0
+        use_sim_time: false
+        transform_tolerance: 1.5
         robot_radius: 0.22
         resolution: 0.05
         track_unknown_space: true
@@ -143,6 +151,7 @@ Basin:
           observation_sources: scan
           scan:
             topic: scan_new
+            sensor_frame: Basin/rplidar_link
             max_obstacle_height: 2.0
             clearing: true
             marking: true
@@ -154,26 +163,25 @@ Basin:
         inflation_layer:
           plugin: nav2_costmap_2d::InflationLayer
           cost_scaling_factor: 3.0
-          inflation_radius: 0.8
-        robot_radius: 0.26
+          inflation_radius: 0.55
         always_send_full_costmap: true
 
   planner_server:
     ros__parameters:
       expected_planner_frequency: 2.0
-      use_sim_time: true
-      transform_tolerance: 3.0
+      use_sim_time: false
+      transform_tolerance: 1.5
       planner_plugins: [GridBased]
       GridBased:
         plugin: nav2_navfn_planner::NavfnPlanner
-        tolerance: 0.3
+        tolerance: 0.5
         use_astar: false
-        allow_unknown: false
+        allow_unknown: true
         publish_planning_tf: false
 
   behavior_server:
     ros__parameters:
-      use_sim_time: true
+      use_sim_time: false
       costmap_topic: local_costmap/costmap_raw
       footprint_topic: local_costmap/published_footprint
       cycle_frequency: 5.0
@@ -191,7 +199,7 @@ Basin:
       global_frame: Basin/odom
       local_frame: Basin/odom
       robot_base_frame: Basin/base_link
-      transform_tolerance: 3.0
+      transform_tolerance: 1.5
       simulate_ahead_time: 1.0
       max_rotational_vel: 0.6
       min_rotational_vel: 0.4
@@ -199,7 +207,7 @@ Basin:
 
   waypoint_follower:
     ros__parameters:
-      use_sim_time: true
+      use_sim_time: false
       loop_rate: 5
       stop_on_failure: false
       waypoint_task_executor_plugin: wait_at_waypoint
@@ -210,7 +218,7 @@ Basin:
 
   velocity_smoother:
     ros__parameters:
-      use_sim_time: true
+      use_sim_time: false
       use_stamped_vel: false
       cmd_vel_topic: cmd_vel_unstamped
       smoothing_frequency: 5.0

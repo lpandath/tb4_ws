@@ -61,6 +61,7 @@ setup(
             "phase1_controller = robots.phase1_controller:main",
             "phase2_circle_controller = robots.phase2_circle_controller:main",
             "launch_dashboard = robots.launch_dashboard:main",
+            "wait_for_topic = robots.wait_for_topic:main",
         ],
     },
 )
