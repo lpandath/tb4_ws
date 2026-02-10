@@ -1,0 +1,31 @@
+# Phase 2: Circle controller (map frame)
+# Drives one or two robots on a circle. Set circle center/radius from your map (e.g. RViz).
+
+phase2_circle_controller:
+  ros__parameters:
+    # Frame for poses and circle. Use "Moon/map" when running Moon localization.
+    map_frame: "Moon/map"
+
+    # One robot: "Moon". Two robots: "Moon,Basin"
+    robots: "Moon"
+
+    # Circle in map frame (meters)
+    circle_center_x: 0.0
+    circle_center_y: 0.0
+    circle_radius: 1.0
+
+    # 1 = CCW, -1 = CW
+    circle_direction: 1
+
+    linear_speed: 0.15
+    control_rate: 30.0
+
+    # For two robots: target angle between them (rad). 3.14159... = 180° (opposite).
+    target_relative_angle_rad: 3.141592653589793
+
+    k_heading: 1.0
+    k_radius: 0.2
+    max_accel_linear: 0.06
+    max_accel_angular: 0.12
+
+    start_immediately: false

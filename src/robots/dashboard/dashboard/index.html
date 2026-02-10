@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Robot Control — Table Performer</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <header class="header">
+        <div>
+          <h1>Robot Control</h1>
+          <div class="subtitle">
+            Launch dashboard for Moon &amp; Basin. Runs on the operator Pi.
+          </div>
+          <a href="diagram.html">Setup diagram</a>
+        </div>
+        <div class="status">
+          <span class="dot" id="connDot" aria-hidden="true"></span>
+          <span id="connText">…</span>
+        </div>
+      </header>
+
+      <section class="card">
+        <h2>Status</h2>
+        <div class="row">
+          <span id="statusText">Status: …</span>
+        </div>
+        <div class="btnRow" style="margin-top: 10px;">
+          <button class="btn good" id="checkStatusBtn">Check status</button>
+          <button class="btn secondary" id="viewLogsBtn">View logs</button>
+        </div>
+        <p class="hint">
+          Detected namespace and available actions will appear in the log.
+        </p>
+      </section>
+
+      <section class="grid">
+        <div class="card">
+          <h2>Launch (background)</h2>
+          <div class="btnRow" id="background-buttons"></div>
+          <p class="hint">
+            Scan and relay run in background; start these first.
+          </p>
+        </div>
+
+        <div class="card">
+          <h2>Launch (foreground)</h2>
+          <div class="btnRow">
+            <button class="btn warn" id="btn-stop">Stop current launch</button>
+            <span id="foreground-buttons"></span>
+          </div>
+          <p class="hint">
+            Only one foreground launch at a time (Phase 1, localization, navigation, etc.).
+          </p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Logs</h2>
+        <div class="log" id="log"></div>
+        <div class="row">
+          <button class="btn secondary" id="clearLogBtn">Clear</button>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div>
+          If something fails, click "View logs" and check for errors in the log.
+        </div>
+      </footer>
+    </div>
+
+    <script>
+      const BACKGROUND_KEYS = ['moon_scan', 'basin_scan', 'moon_relay', 'basin_relay'];
+      const connDot = document.getElementById('connDot');
+      const connText = document.getElementById('connText');
+      const statusText = document.getElementById('statusText');
+      const logEl = document.getElementById('log');
+      const backgroundContainer = document.getElementById('background-buttons');
+      const foregroundContainer = document.getElementById('foreground-buttons');
+
+      function addLogLine(text, isError) {
+        const line = document.createElement('div');
+        line.className = 'logLine' + (isError ? ' err' : '');
+        line.textContent = new Date().toLocaleTimeString() + ' — ' + (text || '');
+        logEl.appendChild(line);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function setLogContent(text, isError) {
+        logEl.textContent = text || '';
+        logEl.classList.toggle('err', !!isError);
+      }
+
+      function updateStatus() {
+        fetch('/status')
+          .then(r => r.text())
+          .then(t => {
+            statusText.textContent = 'Status: ' + t;
+            connDot.classList.add('connected');
+            connText.textContent = 'Ready';
+          })
+          .catch(() => {
+            statusText.textContent = 'Status: (unable to reach server)';
+            connDot.classList.remove('connected');
+            connText.textContent = 'Disconnected';
+          });
+      }
+
+      document.getElementById('checkStatusBtn').onclick = () => {
+        updateStatus();
+        addLogLine('Status checked.');
+      };
+
+      document.getElementById('viewLogsBtn').onclick = () => {
+        document.getElementById('log').scrollIntoView({ behavior: 'smooth' });
+      };
+
+      document.getElementById('clearLogBtn').onclick = () => {
+        logEl.innerHTML = '';
+      };
+
+      function loadLaunches() {
+        fetch('/launches')
+          .then(r => r.json())
+          .then(launches => {
+            backgroundContainer.innerHTML = '';
+            foregroundContainer.innerHTML = '';
+            launches.forEach(({ key, description }) => {
+              const btn = document.createElement('button');
+              btn.type = 'button';
+              btn.className = BACKGROUND_KEYS.includes(key) ? 'btn good' : 'btn good';
+              btn.textContent = description;
+              btn.onclick = () => run(key);
+              if (BACKGROUND_KEYS.includes(key)) {
+                backgroundContainer.appendChild(btn);
+              } else {
+                foregroundContainer.appendChild(btn);
+              }
+            });
+          })
+          .catch(() => addLogLine('Could not load launch list.', true));
+      }
+
+      function run(launch) {
+        addLogLine('Starting ' + launch + '…');
+        fetch('/run?launch=' + encodeURIComponent(launch), { method: 'POST' })
+          .then(r => r.text())
+          .then(t => {
+            const isErr = t.indexOf('Started') !== 0 && t.indexOf('No foreground') !== 0;
+            addLogLine(t, isErr);
+            updateStatus();
+          })
+          .catch(e => {
+            addLogLine(e.message || 'Request failed.', true);
+            updateStatus();
+          });
+      }
+
+      document.getElementById('btn-stop').onclick = () => {
+        fetch('/stop', { method: 'POST' })
+          .then(r => r.text())
+          .then(t => {
+            addLogLine(t);
+            updateStatus();
+          })
+          .catch(e => addLogLine(e.message, true));
+      };
+
+      setInterval(updateStatus, 2000);
+      updateStatus();
+      loadLaunches();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,5 @@
+# Test spin - manually trigger a swing
+string robot_name
+---
+bool success
+string message

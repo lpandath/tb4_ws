@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Setup diagram — Table Performer</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    .diagram-page { max-width: 50rem; }
+    .diagram-intro { margin-bottom: 1.5rem; color: #555; font-size: 0.95rem; }
+    .diagram {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: center;
+      justify-content: center;
+      margin: 1.5rem 0;
+    }
+    .box {
+      border: 2px solid #333;
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      min-width: 10rem;
+      text-align: center;
+      background: #fff;
+    }
+    .box.you { border-color: #2c5; background: #f0fff0; }
+    .box.moon { border-color: #25a; background: #f0f4ff; }
+    .box.basin { border-color: #a52; background: #fff8f0; }
+    .box.router { border-color: #666; background: #f5f5f5; }
+    .box-title { font-weight: bold; font-size: 1.1rem; margin-bottom: 0.5rem; }
+    .box-detail { font-size: 0.9rem; color: #444; margin: 0.25rem 0; }
+    .box-ip { font-family: ui-monospace, monospace; background: #eee; padding: 0.2em 0.5em; border-radius: 4px; margin-top: 0.5rem; display: inline-block; }
+    .connector { flex: 0 0 auto; color: #888; font-size: 1.5rem; }
+    .info-table { width: 100%; border-collapse: collapse; margin-top: 1.5rem; font-size: 0.95rem; }
+    .info-table th, .info-table td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; }
+    .info-table th { background: #f5f5f5; width: 30%; }
+    .info-table .placeholder { color: #888; font-style: italic; }
+    .back-link { display: inline-block; margin-bottom: 1rem; color: #25a; text-decoration: none; }
+    .back-link:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="diagram-page">
+    <a href="index.html" class="back-link">← Back to dashboard</a>
+    <header>
+      <h1>Setup diagram</h1>
+      <p class="tagline">Who is what and how to reach them</p>
+    </header>
+    <p class="diagram-intro">Simple picture of the setup. Fill in the IPs and router names below so it’s clear for everyone (e.g. for someone who isn’t technical).</p>
+
+    <div class="diagram mermaid">
+flowchart TB
+  subgraph MINI_PC["Mini PC"]
+    direction TB
+      MONITOR["Monitor"]
+      KB["Keyboard"]
+      MOUSE["Mouse"]
+      BROWSER["Browser → Web UI"]
+      FOXGLOVE["Foxglove Studio (i use for setup)"]
+  end
+  subgraph BASIN["Robot: Basin"]
+    direction TB
+      RPI_B["Raspberry Pi"]
+      BRINGUP_B["Bringup (lite)"]
+      SLAM_B["SLAM"]
+      WEB["Web server (Operator Console)"]
+      FOX_BRIDGE["Foxglove bridge"]
+  end
+  subgraph MOON["Robot: Moon"]
+    direction TB
+      RPI_M["Raspberry Pi"]
+      BRINGUP_M["Bringup (lite)"]
+      SLAM_M["SLAM"]
+  end
+  subgraph ROOM["Room (physical setup)"]
+      MINI_PC
+      BASIN
+      MOON
+  end
+    RPI_B --> BRINGUP_B & SLAM_B & WEB & FOX_BRIDGE
+    RPI_M --> BRINGUP_M & SLAM_M
+    ROUTER["Router (take it with me)"] -- Wi‑Fi / LAN --> MINI_PC & BASIN & MOON
+    ROUTER -- WAN (haus) --> INTERNET["Internet"]
+    BROWSER -- "http://Basin-IP:8081" --> WEB
+    FOXGLOVE -- "ws://Basin-IP:8765" --> FOX_BRIDGE
+    </div>
+
+    <h2>Info to fill in</h2>
+    <p>Use this table (or the diagram) and replace the placeholders with your real info. Then the diagram is clear for anyone.</p>
+    <table class="info-table">
+      <tr>
+        <th>What</th>
+        <th>Info (IP, name, etc.)</th>
+      </tr>
+      <tr>
+        <td>Moon robot IP</td>
+        <td class="placeholder">e.g. 192.168.1.10 — open http://&lt;this&gt;:8081 for the dashboard</td>
+      </tr>
+      <tr>
+        <td>Basin robot IP</td>
+        <td class="placeholder">e.g. 192.168.1.11</td>
+      </tr>
+      <tr>
+        <td>Router(s)</td>
+        <td class="placeholder">e.g. name, IP, or “both robots and laptop on same Wi‑Fi”</td>
+      </tr>
+      <tr>
+        <td>Your laptop</td>
+        <td class="placeholder">Optional: e.g. “same Wi‑Fi as robots” or laptop IP if needed</td>
+      </tr>
+    </table>
+  </div>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true });
+  </script>
+</body>
+</html>

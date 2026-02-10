@@ -1,0 +1,20 @@
+clock_swing_controller:
+  ros__parameters:
+    robot_names: ["Moon", "Basin"]
+    directions: [-1, 1]
+    scan_topic: "scan"
+    scan_topics: ["scan_new", "scan"]
+    cmd_vel_topic: "cmd_vel"
+    cmd_vel_topics: ["cmd_vel_unstamped", "cmd_vel"]
+    radius: 0.8
+    linear_speed: 0.15
+    stop_distance: 0.3
+    start_distance: 3.0
+    scan_angle_min_deg: -90.0
+    scan_angle_max_deg: 90.0
+    scan_min_range: 0.05
+    scan_max_range: 5.0
+    control_rate: 10.0
+    require_both_active_to_start: false
+    auto_restart: false
+    debug_log: true

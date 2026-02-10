@@ -1,0 +1,7 @@
+# Get system status - query state of all robots
+---
+bool success
+string system_status
+string next_motion
+bool window_active
+string robots_json

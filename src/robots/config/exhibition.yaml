@@ -1,0 +1,28 @@
+# Exhibition Master Controller Configuration
+# Orchestrates both swing and circular movement sequences
+
+exhibition_master_controller:
+  ros__parameters:
+    # Movement mode selection
+    movement_mode: "circular_only"  # TEST CIRCULAR ONLY
+    
+    # Which robots to control
+    robot_names: ["Moon", "Basin"]
+    directions: [1, -1]  # Opposite directions for arcs
+    
+    # Motion parameters
+    linear_speed: 0.25  # m/s for circular arc
+    control_rate: 50.0  # Hz
+    
+    # Scheduling - ALWAYS ACTIVE FOR TESTING
+    cycle_period: 900.0      # 15 minutes
+    active_window: 900.0     # ALWAYS ACTIVE (full cycle)
+    
+    # Phase durations (won't matter with active_window=900)
+    swing_duration: 180.0
+    circular_duration: 300.0  # 5 minutes for arc
+    return_duration: 60.0
+    
+    # Proximity thresholds - RELAXED FOR TESTING
+    distance_stop: 0.2       # Only stop if < 20cm (very close)
+    distance_start: 10.0     # Far threshold = 10m (almost always active)

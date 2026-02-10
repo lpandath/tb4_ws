@@ -1,0 +1,33 @@
+# Clock Swing Controller Configuration
+# Exhibition robot idle battery management and visitor-aware motion
+
+clock_swing_controller:
+  ros__parameters:
+    # Which robots to control
+    robot_names: ["Moon", "Basin"]
+    directions: [-1, 1]  # Synchronized opposite directions for half-circle swings
+
+    # Motion parameters
+    linear_speed: 0.15  # m/s nominal forward speed
+    target_radius: 0.8  # meters - radius of arc during swing
+
+    # Visitor detection thresholds (front-sector LiDAR, degrees ±60)
+    # REDUCED for home testing - nearest object is ~1.2m away
+    distance_stop: 0.3    # person < 0.3m (30cm): pause motion
+    distance_start: 0.6   # person 0.3-0.6m (30-60cm): begin/resume motion
+    distance_resume: 0.5  # hysteresis for resume from pause (50cm)
+
+    # Time-based scheduling
+    cycle_period: 600.0    # 10 minutes - full cycle duration
+    active_window: 60.0    # 1 minute per cycle - how long robots move
+    periodic_motion_enabled: true  # Move even without visitors (battery-conscious)
+
+    # Control loop
+    control_rate: 20.0  # Hz update rate
+    # ramp_fraction: 0.20  # 20% of swing for accel/decel ramps
+
+    # LiDAR parameters
+    scan_angle_min_deg: -60.0
+    scan_angle_max_deg: 60.0
+    scan_min_range: 0.05
+    scan_max_range: 5.0
