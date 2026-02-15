@@ -38,8 +38,8 @@ def _launch(context, *args, **kwargs):
                 {"close_resume": 0.90},
                 {"auto_start": True},
                 {"duty_cycle": duty},
-                {"active_duration": 90.0},
-                {"rest_duration": 420.0},
+                {"active_duration": 180.0},
+                {"rest_duration": 720.0},
             ],
         )
     ]

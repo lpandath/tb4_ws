@@ -67,8 +67,8 @@ def load_parameters(node: Node):
     node.declare_parameter("scan_topic", "scan")
     node.declare_parameter("auto_start", False)
     node.declare_parameter("duty_cycle", False)
-    node.declare_parameter("active_duration", 90.0)    # 1.5 min moving
-    node.declare_parameter("rest_duration", 420.0)     # 7 min rest
+    node.declare_parameter("active_duration", 180.0)    # 3 min moving
+    node.declare_parameter("rest_duration", 720.0)     # 12 min rest
 
     motion = MotionProfile(
         ROTATION_ANGLE=node.get_parameter("rotation_angle").value,
@@ -233,13 +233,14 @@ class Phase1Robot:
                 self._emergency_until = now + 0.3
                 return
 
-            # Hysteresis: stop at 50cm, resume at 60cm
+            # Hysteresis: stop at 80cm, resume at 90cm
             if self._is_close:
                 if self._closest_360 >= self.safety.CLOSE_RESUME:
                     self._is_close = False
             else:
                 if self._closest_360 < self.safety.CLOSE_STOP:
                     self._is_close = True
+
 
     def update(self, rotating, dt):
         with self._lock:
