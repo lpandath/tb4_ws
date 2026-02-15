@@ -50,7 +50,11 @@ def generate_launch_description():
         name="odom_to_tf_broadcaster",
         output="screen",
         namespace="Basin",
-        remappings=[("odom", "odom")],
+        remappings=[
+            ("odom", "odom"),
+            ("tf", "/tf"),
+            ("tf_static", "/tf_static"),
+        ],
     )
 
     delayed_group = TimerAction(period=startup_delay, actions=[scan_frame_corrector, odom_to_tf_broadcaster])

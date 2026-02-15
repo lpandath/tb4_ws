@@ -51,7 +51,11 @@ def generate_launch_description():
         name="odom_to_tf_broadcaster",
         output="screen",
         namespace="Moon",
-        remappings=[("odom", "odom")],  # Subscribes to /Moon/odom
+        remappings=[
+            ("odom", "odom"),
+            ("tf", "/tf"),
+            ("tf_static", "/tf_static"),
+        ],
     )
 
     # Wait `startup_delay` seconds before launching the scan/TF nodes so AMCL

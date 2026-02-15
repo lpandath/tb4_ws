@@ -1,34 +1,34 @@
-Moon:
+Basin:
   slam_toolbox:
     ros__parameters:
       # BASIC SETTINGS
       use_sim_time: false
       scan_topic: "scan_new"
-      map_frame: "Moon/map"
-      odom_frame: "Moon/odom"
-      base_frame: "Moon/base_link"
+      map_frame: "Basin/map"
+      odom_frame: "Basin/odom"
+      base_frame: "Basin/base_link"
       mode: "mapping"
-      
+
       # TF SETTINGS (CRITICAL)
       transform_tolerance: 10.0
       tf_buffer_duration: 60.0
       transform_timeout: 1.0
       scan_queue_size: 20
       map_update_interval: 2.0
-      
+
       # PROCESSING (SLOW IT DOWN)
       minimum_time_interval: 2.0
       throttle_scans: 5
       do_loop_closing: false
-      
+
       # MAP SETTINGS
       resolution: 0.05
       max_laser_range: 12.0
       occupancy_grid_update_frequency: 1.0
-      
+
       # SOLVER
       solver_plugin: "solver_plugins::CeresSolver"
       ceres_max_num_iterations: 10
-      
+
       # QOS
       qos_scan: 0

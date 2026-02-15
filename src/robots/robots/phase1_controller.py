@@ -1,647 +1,541 @@
 #!/usr/bin/env python3
 """
 PHASE 1: CLOCK MOVEMENT CONTROLLER (ANNUAL CLOCK)
-Exhibition motion control for Moon and Basin robots.
-
-- In-place semicircle (180°) back-and-forth, like an annual clock: one sweep, then return.
-- Visitors walk around the robots to see other sculptures; lidar sees them when in front.
-- Audience zone: move only when someone in range (STOP–FAR cm); idle when too close or far.
-- Stability: EMA-smoothed distance + hysteresis + min hold times to avoid flip-flop.
+=================================================
+- Robot always swings ~160 degrees back and forth (like a pendulum)
+- Stops ONLY when someone is within 80cm (360° safety detection)
+- Resumes when person moves away beyond 90cm
 """
 
 import math
-import sys
+import signal
 import time
+import threading
 from enum import Enum, auto
 from dataclasses import dataclass
-from typing import Dict
-import threading
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy
-from geometry_msgs.msg import Twist
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+from geometry_msgs.msg import Twist, TwistStamped
 from sensor_msgs.msg import LaserScan
+from std_srvs.srv import Empty as EmptySrv
+
+SCAN_TIMEOUT = 10.0      # Stop robot if no scan data for this many seconds
+SCAN_RESUBSCRIBE = 15.0  # Re-create subscription to force DDS re-discovery
 
 
 class MotionState(Enum):
-    """Discrete motion states."""
-
     IDLE = auto()
-    ACCELERATING = auto()
-    CRUISING = auto()
-    DECELERATING = auto()
-    PAUSED = auto()
-    TURN_AROUND = auto()  # brief full stop between semicircle and return (no jerk)
-    COMPLETE = auto()
+    MOVING = auto()
+    PAUSED = auto()       # Stopped because person too close
+    TURN_AROUND = auto()  # Pause between sweeps
 
 
 @dataclass(frozen=True)
-class Phase1Profile:
-    """Motion and safety parameters."""
+class MotionProfile:
+    ROTATION_ANGLE: float = 2.79       # ~160 degrees
+    HALF_SWEEP_DURATION: float = 300.0 # Seconds per sweep (5 min)
+    TOTAL_DURATION: float = 600.0      # Total run time (10 min)
+    MAX_ANGULAR_SPEED: float = 0.06    # rad/s
+    MIN_ANGULAR_SPEED: float = 0.01    # rad/s (smooth start)
+    MAX_ACCEL_ANGULAR: float = 0.04    # Smooth acceleration
+    CONTROL_RATE: float = 25.0         # Hz
 
-    # Rotation: semicircle back-and-forth (annual clock)
-    LINEAR_SPEED: float = 0.15  # m/s (unused for in-place)
-    TARGET_RADIUS: float = 0.3  # m (unused for in-place)
-    ROTATION_ANGLE: float = (
-        math.pi
-    )  # 180° per sweep; direction flips each sweep → back-and-forth
 
-    # Human proximity (meters). Only perform when audience in range (save battery).
-    DISTANCE_STOP: float = 0.20  # too close → stop (safety)
-    DISTANCE_FAR: float = (
-        0.50  # start moving when distance <= FAR; go idle when > FAR + HYSTERESIS
+@dataclass(frozen=True)
+class SafetyProfile:
+    CLOSE_STOP: float = 0.80       # < 80cm from any direction: stop
+    CLOSE_RESUME: float = 0.90     # > 90cm: resume (hysteresis)
+    LIDAR_MIN_RANGE: float = 0.15  # Ignore < 15cm (noise)
+    LIDAR_MAX_RANGE: float = 5.0   # Ignore > 5m
+    EMERGENCY_DIST: float = 0.20   # < 20cm: hard emergency stop
+
+
+def load_parameters(node: Node):
+    node.declare_parameter("close_stop", 0.80)
+    node.declare_parameter("close_resume", 0.90)
+    node.declare_parameter("rotation_angle", 2.79)
+    node.declare_parameter("half_sweep_duration", 300.0)
+    node.declare_parameter("total_duration", 600.0)
+    node.declare_parameter("max_angular_speed", 0.06)
+    node.declare_parameter("min_angular_speed", 0.03)
+    node.declare_parameter("max_accel_angular", 0.04)
+    node.declare_parameter("control_rate", 25.0)
+    node.declare_parameter("lidar_min_range", 0.15)
+    node.declare_parameter("lidar_max_range", 5.0)
+    node.declare_parameter("scan_topic", "scan")
+    node.declare_parameter("auto_start", False)
+    node.declare_parameter("duty_cycle", False)
+    node.declare_parameter("active_duration", 90.0)    # 1.5 min moving
+    node.declare_parameter("rest_duration", 420.0)     # 7 min rest
+
+    motion = MotionProfile(
+        ROTATION_ANGLE=node.get_parameter("rotation_angle").value,
+        HALF_SWEEP_DURATION=node.get_parameter("half_sweep_duration").value,
+        TOTAL_DURATION=node.get_parameter("total_duration").value,
+        MAX_ANGULAR_SPEED=node.get_parameter("max_angular_speed").value,
+        MIN_ANGULAR_SPEED=node.get_parameter("min_angular_speed").value,
+        MAX_ACCEL_ANGULAR=node.get_parameter("max_accel_angular").value,
+        CONTROL_RATE=node.get_parameter("control_rate").value,
     )
-    FAR_HYSTERESIS: float = (
-        0.25  # avoid flip-flop: only go "idle (far)" when distance > FAR + this
-    )
-    STOP_HYSTERESIS: float = 0.05  # resume moving only when d > STOP + this (e.g. 25+5=30 cm) so boundary is clear
 
-    # Speed scaling (only NORMAL and STOP used; no "slow" band)
-    SPEED_SCALE_NORMAL: float = 1.0
-    SPEED_SCALE_STOP: float = 0.0
-
-    # Scheduling
-    HALF_CIRCLE_DURATION: float = 300.0  # seconds per semicircle (one 180° sweep)
-    TOTAL_DURATION: float = 600.0  # total run time (e.g. 10 min)
-
-    # Control
-    CONTROL_RATE: float = 30.0
-    RAMP_FRACTION: float = 0.15
-    # Very gentle (0.05 rad/s) to reduce jump when base goes 0 → moving; if it doesn't move, try 0.08 in launch
-    MIN_ANGULAR_SPEED: float = 0.05
-    MAX_ANGULAR_SPEED: float = 0.05
-    # Smoothing & stability (stop flip-flop from noisy lidar)
-    DISTANCE_SMOOTH_ALPHA: float = 0.12  # EMA: lower = smoother, ~8 scans to shift
-    AUDIENCE_MIN_HOLD_SEC: float = (
-        2.5  # stay "moving" at least this long once in audience zone
+    safety = SafetyProfile(
+        CLOSE_STOP=node.get_parameter("close_stop").value,
+        CLOSE_RESUME=node.get_parameter("close_resume").value,
+        LIDAR_MIN_RANGE=node.get_parameter("lidar_min_range").value,
+        LIDAR_MAX_RANGE=node.get_parameter("lidar_max_range").value,
     )
-    FAR_MIN_HOLD_SEC: float = (
-        1.5  # stay "idle (far)" at least this long before allowing move
-    )
+
+    return motion, safety
 
 
 class Phase1Robot:
-    """Per-robot motion and safety controller."""
+    """
+    Controls ONE robot. Always swings back and forth.
+    Only stops when 360° lidar detects someone within 50cm.
+    """
 
-    def __init__(
-        self,
-        name: str,
-        namespace: str,
-        direction: int,
-        node: Node,
-        profile: Phase1Profile,
-        scan_topic: str = "scan_new",
-        scan_sector_deg: float = 120.0,
-    ):
+    def __init__(self, name, namespace, direction, node, motion, safety, scan_topic):
         self.name = name
         self.namespace = namespace
-        self.direction = direction  # +1 or -1 for CW/CCW
+        self.direction = direction
         self.node = node
-        self.profile = profile
+        self.motion = motion
+        self.safety = safety
         self.scan_topic = scan_topic
-        self.scan_sector_deg = scan_sector_deg
 
         self._lock = threading.RLock()
+        self._created_time = time.time()
 
-        # Motion state (full circles in one direction)
-        self.motion_state = MotionState.IDLE
-        self.speed_scale = profile.SPEED_SCALE_STOP
+        self.state = MotionState.IDLE
         self.rotation_progress = 0.0
-
-        # Perception
-        self._obstacle_distance = float("inf")
-        self._obstacle_distance_smooth = (
-            2.0  # EMA; use for zone logic (starts mid-range)
-        )
-        self._last_scan_time = 0.0
-        self._logged_scan_connected = False
-        self._last_was_audience = False
-        self._audience_since = 0.0  # time when we last entered "moving" (audience)
-        self._far_since = 0.0  # time when we last entered "idle (far)"
-
-        # Telemetry
-        self.motion_start_time = None
         self.completion_count = 0
-        self.pause_count = 0
-        self._turn_around_until = 0.0  # time.time() until we leave TURN_AROUND
+
+        # Safety: closest object in 360°
+        self._closest_360 = float("inf")
+        self._is_close = False  # Is someone within close_stop distance?
+        self._last_scan_time = 0.0
+        self._scan_count = 0
+        self._scan_lost = False  # True when scan data has timed out
+        self._scan_lost_time = 0.0  # When scan was first lost
+        self._last_resubscribe = 0.0
+        self._scan_subs = []  # Track subscriptions for re-creation
+        self._last_status_time = 0.0
+
+        # Velocity
+        self._last_omega = 0.0
+        self._max_domega = motion.MAX_ACCEL_ANGULAR / motion.CONTROL_RATE
+
+        # Timers
+        self._turn_around_until = 0.0
+        self._emergency_until = 0.0
+        self._resume_until = 0.0  # Soft-start delay after resuming from pause
 
         self._setup_ros()
-        node.get_logger().info(f" {self.name}: READY")
 
     def _setup_ros(self):
-        """Single topic (cmd_vel_unstamped) to avoid one robot getting double/conflicting commands and jumping."""
-        qos_cmd = QoSProfile(reliability=QoSReliabilityPolicy.RELIABLE, depth=1)
+        qos_cmd = QoSProfile(
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            history=QoSHistoryPolicy.KEEP_LAST, depth=1,
+        )
+        # Publish Twist to cmd_vel_unstamped (for create3_repub if running)
         self.cmd_pub = self.node.create_publisher(
             Twist, f"/{self.namespace}/cmd_vel_unstamped", qos_cmd
         )
-
-        qos_scan = QoSProfile(reliability=QoSReliabilityPolicy.BEST_EFFORT, depth=1)
-        scan_topic_full = f"/{self.namespace}/{self.scan_topic}"
-        self.scan_sub = self.node.create_subscription(
-            LaserScan, scan_topic_full, self._scan_callback, qos_scan
+        # Also publish TwistStamped to cmd_vel (direct to Create 3 base)
+        self.cmd_stamped_pub = self.node.create_publisher(
+            TwistStamped, f"/{self.namespace}/cmd_vel", qos_cmd
         )
 
+        self._subscribe_scan()
+
+        # Lidar motor service clients
+        self._start_motor_cli = self.node.create_client(
+            EmptySrv, f"/{self.namespace}/start_motor"
+        )
+        self._stop_motor_cli = self.node.create_client(
+            EmptySrv, f"/{self.namespace}/stop_motor"
+        )
+        self._lidar_on = True
+
+    def start_lidar(self):
+        """Start lidar motor and re-subscribe to scan data."""
+        if not self._lidar_on:
+            self._lidar_on = True
+            self._scan_count = 0
+            self._last_scan_time = 0.0
+            self._scan_lost = False
+            if self._start_motor_cli.service_is_ready():
+                self._start_motor_cli.call_async(EmptySrv.Request())
+                self.node.get_logger().info(f"{self.name}: lidar motor START")
+            else:
+                self.node.get_logger().warn(f"{self.name}: start_motor service not ready")
+            self._subscribe_scan()
+
+    def stop_lidar(self):
+        """Stop lidar motor to save battery."""
+        if self._lidar_on:
+            self._lidar_on = False
+            if self._stop_motor_cli.service_is_ready():
+                self._stop_motor_cli.call_async(EmptySrv.Request())
+                self.node.get_logger().info(f"{self.name}: lidar motor STOP (saving battery)")
+            else:
+                self.node.get_logger().warn(f"{self.name}: stop_motor service not ready")
+
+    def _subscribe_scan(self):
+        """Create scan subscriptions. Can be called again to force DDS re-discovery."""
+        # Destroy old subscriptions if any
+        for sub in self._scan_subs:
+            self.node.destroy_subscription(sub)
+        self._scan_subs.clear()
+
+        for reliability in [QoSReliabilityPolicy.BEST_EFFORT, QoSReliabilityPolicy.RELIABLE]:
+            qos = QoSProfile(reliability=reliability,
+                             history=QoSHistoryPolicy.KEEP_LAST, depth=5)
+            sub = self.node.create_subscription(
+                LaserScan, f"/{self.namespace}/{self.scan_topic}",
+                self._scan_callback, qos,
+            )
+            self._scan_subs.append(sub)
+
     def _scan_callback(self, msg: LaserScan):
-        """Process LiDAR scan - front sector ±scan_sector_deg; closest point in that cone (raw used for stop)."""
+        """360° scan: find closest object in any direction for safety."""
         if msg.angle_increment <= 0:
             return
 
         now = time.time()
-        half = self.scan_sector_deg  # ±half degrees from front
-        # Extract front sector (wider = see you before you're right at the lidar)
-        start_idx = max(
-            0, int((math.radians(-half) - msg.angle_min) / msg.angle_increment)
-        )
-        end_idx = min(
-            len(msg.ranges) - 1,
-            int((math.radians(half) - msg.angle_min) / msg.angle_increment),
-        )
-
-        # Use 0.02 m min so we detect hand very close (was 0.1 and hid 3–10 cm readings)
         closest = float("inf")
-        for i in range(start_idx, end_idx + 1):
-            val = msg.ranges[i]
-            if 0.02 < val < 5.0:
-                closest = min(closest, val)
+        for r in msg.ranges:
+            if self.safety.LIDAR_MIN_RANGE < r < self.safety.LIDAR_MAX_RANGE:
+                if r < closest:
+                    closest = r
 
         with self._lock:
-            was_first_scan = self._last_scan_time == 0.0
-            raw = closest if closest != float("inf") else 10.0
-            self._obstacle_distance = raw
+            self._closest_360 = closest if closest != float("inf") else self.safety.LIDAR_MAX_RANGE
             self._last_scan_time = now
+            self._scan_count += 1
 
-            # EMA: only treat 11 cm as outlier when we're far (smooth > 80 cm), so movement can start from 30–80 cm
-            alpha = self.profile.DISTANCE_SMOOTH_ALPHA
-            smooth_now = self._obstacle_distance_smooth
-            stop = self.profile.DISTANCE_STOP
-            far = self.profile.DISTANCE_FAR
-            far_idle = far + self.profile.FAR_HYSTERESIS
-            if raw < 0.15 and smooth_now > far:
-                alpha = 0.02  # far and 11 cm spike: don't pull smooth into audience zone
-            elif raw < (stop + 0.10) and smooth_now > far_idle:
-                alpha = 0.02  # same when well past far threshold
-            self._obstacle_distance_smooth = (
-                alpha * raw + (1.0 - alpha) * self._obstacle_distance_smooth
-            )
+            # Recovered from scan loss
+            if self._scan_lost:
+                self._scan_lost = False
+                self.node.get_logger().warn(f"{self.name}: scan data RECOVERED")
 
-            if was_first_scan and not self._logged_scan_connected:
-                self._logged_scan_connected = True
+            if self._scan_count == 1:
                 self.node.get_logger().info(
-                    f"Scan connected for {self.name} ({self.scan_topic})"
+                    f"{self.name}: first scan! closest={self._closest_360:.2f}m"
                 )
 
-            # Zone logic: clear 25 cm stop, 25+5=30 cm to resume move, 80 cm far
-            stop = self.profile.DISTANCE_STOP
-            stop_resume = stop + self.profile.STOP_HYSTERESIS  # e.g. 30 cm — must be this far to move again
-            far = self.profile.DISTANCE_FAR
-            far_idle = far + self.profile.FAR_HYSTERESIS
-            hold_audience = self.profile.AUDIENCE_MIN_HOLD_SEC
-            hold_far = self.profile.FAR_MIN_HOLD_SEC
-            d = self._obstacle_distance_smooth
-            raw_d = self._obstacle_distance
-
-            # Too close: stop only when BOTH raw and smooth are below 25 cm (same approach as before, 25 cm instead of 11)
-            if raw_d < stop and d < stop:
-                self.speed_scale = self.profile.SPEED_SCALE_STOP
-                self._last_was_audience = False
+            # Emergency stop at 20cm
+            if self._closest_360 < self.safety.EMERGENCY_DIST:
+                self._is_close = True
+                self._stop()
+                self._emergency_until = now + 0.3
                 return
 
-            # Audience (move): only when d > 30 cm and d <= 80 cm — so 25–30 cm band keeps previous (no flip)
-            in_audience_zone = (d > stop_resume) and (d <= far)
-            in_far_zone = d > far_idle
-
-            if in_audience_zone:
-                self._last_was_audience = True
-                if self._far_since == 0.0 or (now - self._far_since) >= hold_far:
-                    was_stopped = self.speed_scale == self.profile.SPEED_SCALE_STOP
-                    self.speed_scale = self.profile.SPEED_SCALE_NORMAL
-                    if was_stopped:
-                        self._audience_since = (
-                            now  # transition to moving: start hold timer
-                        )
-            elif in_far_zone:
-                self._last_was_audience = False
-                if (
-                    now - self._audience_since
-                ) >= hold_audience or self._audience_since == 0.0:
-                    was_moving = self.speed_scale == self.profile.SPEED_SCALE_NORMAL
-                    self.speed_scale = self.profile.SPEED_SCALE_STOP
-                    if was_moving:
-                        self._far_since = now  # transition to idle: start hold timer
+            # Hysteresis: stop at 50cm, resume at 60cm
+            if self._is_close:
+                if self._closest_360 >= self.safety.CLOSE_RESUME:
+                    self._is_close = False
             else:
-                # Bands (stop..stop_resume] and (far..far_idle]: keep previous
-                if self._last_was_audience:
-                    self.speed_scale = self.profile.SPEED_SCALE_NORMAL
-                else:
-                    self.speed_scale = self.profile.SPEED_SCALE_STOP
+                if self._closest_360 < self.safety.CLOSE_STOP:
+                    self._is_close = True
 
-    def update(self, rotating: bool, elapsed_time: float, dt: float):
-        """Thread-safe control update."""
-        with self._lock:
-            return self._update_unsafe(rotating, elapsed_time, dt)
-
-    def _update_unsafe(self, rotating: bool, elapsed_time: float, dt: float):
-        """Core control logic."""
-        now = time.time()
-
-        # No scan yet or stale scan → idle (don't move until we see audience zone)
-        if self._last_scan_time == 0.0 or (now - self._last_scan_time > 2.0):
-            self.speed_scale = self.profile.SPEED_SCALE_STOP
-
-        # Not rotating → force idle
-        if not rotating:
-            if self.motion_state != MotionState.IDLE:
-                self._stop_unsafe()
-                self.motion_state = MotionState.IDLE
-                self.rotation_progress = 0.0
-                self.motion_start_time = None
-            return
-
-        # Only leave IDLE when someone is in audience zone (so we stay idle at start if you're far)
-        if self.motion_state == MotionState.IDLE:
-            if self.speed_scale > self.profile.SPEED_SCALE_STOP:
-                self.motion_state = MotionState.ACCELERATING
-                self.rotation_progress = 0.0
-                self.motion_start_time = self.node.get_clock().now()
-            # else stay IDLE and publish 0 until audience in range
-
-        self._update_motion_unsafe(dt)
-        self._publish_velocity_unsafe()
-
-    def _update_motion_unsafe(self, dt: float):
-        """Update motion state machine (full circles, repeat until TOTAL_DURATION)."""
-        if self.motion_state == MotionState.IDLE:
-            return
-
-        # Idle when too close (safety) or far (no audience)
-        if self.speed_scale == self.profile.SPEED_SCALE_STOP:
-            if self.motion_state != MotionState.PAUSED:
-                self.motion_state = MotionState.PAUSED
-                self.pause_count += 1
-                # Use smooth distance for reason/log so 25 cm boundary is clear (not raw 11 cm)
-                d_smooth = self._obstacle_distance_smooth
-                reason = (
-                    "too close"
-                    if d_smooth < self.profile.DISTANCE_STOP
-                    else "no audience (far)"
-                )
-                self.node.get_logger().info(
-                    f"{self.name}: idle — {reason} ({d_smooth*100:.0f} cm)"
-                )
-            return
-
-        # Resume when someone in middle range (audience present)
-        if self.motion_state == MotionState.PAUSED and self.speed_scale > 0:
-            self.motion_state = MotionState.ACCELERATING
-            self.node.get_logger().info(
-                f"{self.name}: audience in range ({self._obstacle_distance_smooth*100:.0f} cm), moving"
-            )
-            return
-
-        # End of semicircle: full stop for 1 s before return sweep (avoids jerk / drifting)
-        if self.motion_state == MotionState.TURN_AROUND:
-            if time.time() >= self._turn_around_until:
-                self.completion_count += 1
-                self.rotation_progress = 0.0
-                self.motion_state = MotionState.ACCELERATING
-                self.node.get_logger().info(
-                    f"{self.name}: starting return sweep ({self.completion_count})"
-                )
-            return
-
-        # Update rotation progress
-        angular_speed = self._calculate_angular_speed_unsafe()
-        total = self.profile.ROTATION_ANGLE
-        remaining = total - self.rotation_progress
-        step = abs(angular_speed) * dt
-        self.rotation_progress += min(step, remaining)
-
-        ramp = self.profile.RAMP_FRACTION
-
-        # Semicircle done: full stop (TURN_AROUND) then return sweep next
-        if self.rotation_progress >= total:
-            self.rotation_progress = total  # cap
-            self.motion_state = MotionState.TURN_AROUND
-            self._turn_around_until = time.time() + 1.0
-            return
-
-        if self.rotation_progress < total * ramp:
-            self.motion_state = MotionState.ACCELERATING
-        elif self.rotation_progress < total * (1 - ramp):
-            self.motion_state = MotionState.CRUISING
-        else:
-            self.motion_state = MotionState.DECELERATING
-
-    def _calculate_angular_speed_unsafe(self) -> float:
-        """Angular velocity (rad/s). Ramp shape for smoothness; clamp to min_ang so base actually moves (many ignore tiny commands)."""
-        total = self.profile.ROTATION_ANGLE
-        progress = self.rotation_progress
-        ramp = self.profile.RAMP_FRACTION
-
-        base_speed = self.profile.ROTATION_ANGLE / self.profile.HALF_CIRCLE_DURATION
-        base_speed *= self.speed_scale
-
-        direction = (
-            self.direction if (self.completion_count % 2 == 0) else -self.direction
-        )
-        min_ang = self.profile.MIN_ANGULAR_SPEED
-        max_ang = self.profile.MAX_ANGULAR_SPEED
-
-        if self.motion_state == MotionState.ACCELERATING:
-            ramp_dist = total * ramp
-            factor = (progress / ramp_dist) if ramp_dist > 0 else 0.0
-            factor = max(factor, 0.02)
-            raw = direction * base_speed * factor
-        elif self.motion_state == MotionState.DECELERATING:
-            raw = direction * base_speed * ((total - progress) / (total * ramp))
-        else:
-            raw = direction * max(base_speed, min_ang)
-        # Clamp to [min_ang, max_ang] so base responds but never gets a big command (gentle in-place only)
-        if raw > 0:
-            return max(min_ang, min(raw, max_ang))
-        if raw < 0:
-            return min(-min_ang, max(raw, -max_ang))
-        return 0.0
-
-    def _publish_velocity_unsafe(self):
-        """Publish Twist: in-place only (linear=0, angular.z). If robot still jumps: stop any other cmd_vel publisher (Nav2/teleop); try max_angular_speed:=0.03 in launch."""
-        cmd = Twist()
-        cmd.linear.x = 0.0
-        cmd.linear.y = 0.0
-        cmd.linear.z = 0.0
-        cmd.angular.x = 0.0
-        cmd.angular.y = 0.0
-        cmd.angular.z = 0.0
-        if self.motion_state not in [
-            MotionState.PAUSED,
-            MotionState.TURN_AROUND,
-            MotionState.COMPLETE,
-            MotionState.IDLE,
-        ]:
-            cmd.angular.z = self._calculate_angular_speed_unsafe()
-        self.cmd_pub.publish(cmd)
-
-    def _stop_unsafe(self):
-        """Send explicit zero velocity (no drift)."""
-        cmd = Twist()
-        cmd.linear.x = 0.0
-        cmd.linear.y = 0.0
-        cmd.linear.z = 0.0
-        cmd.angular.x = 0.0
-        cmd.angular.y = 0.0
-        cmd.angular.z = 0.0
-        self.cmd_pub.publish(cmd)
-
-    def emergency_stop(self):
-        """Immediate stop."""
-        with self._lock:
-            self._stop_unsafe()
-            self.motion_state = MotionState.IDLE
-            self.rotation_progress = 0.0
-
-    def get_status(self) -> Dict:
-        """Return robot status."""
+    def update(self, rotating, dt):
         with self._lock:
             now = time.time()
-            scan_age = now - self._last_scan_time if self._last_scan_time else 999
-            return {
-                "name": self.name,
-                "state": self.motion_state.name,
-                "progress": self.rotation_progress,
-                "distance": self._obstacle_distance,
-                "speed_scale": self.speed_scale,
-                "scan_age": scan_age,
-                "completions": self.completion_count,
-                "pauses": self.pause_count,
-            }
+
+            # Scan watchdog: stop if no scan data for SCAN_TIMEOUT seconds
+            scan_age = (now - self._last_scan_time) if self._last_scan_time > 0 else (now - self._start_time if hasattr(self, '_start_time') else 999)
+            if self._last_scan_time == 0 and self._scan_count == 0:
+                # Never received first scan — use time since setup
+                scan_age = now - getattr(self, '_created_time', now)
+            if scan_age > SCAN_TIMEOUT:
+                if not self._scan_lost:
+                    self._scan_lost = True
+                    self._scan_lost_time = now
+                    self.node.get_logger().error(
+                        f"{self.name}: NO SCAN DATA for {SCAN_TIMEOUT}s! Stopping for safety."
+                    )
+                # Auto-recovery: re-subscribe every SCAN_RESUBSCRIBE seconds
+                if now - self._scan_lost_time >= SCAN_RESUBSCRIBE and now - self._last_resubscribe >= SCAN_RESUBSCRIBE:
+                    self._last_resubscribe = now
+                    self.node.get_logger().warn(
+                        f"{self.name}: re-creating scan subscription (DDS recovery)..."
+                    )
+                    self._subscribe_scan()
+                self._stop()
+                self.state = MotionState.PAUSED
+                return
+
+            # Periodic status log (every 30s)
+            if now - self._last_status_time >= 30.0:
+                self._last_status_time = now
+                direction = "CW" if (self.direction if self.completion_count % 2 == 0 else -self.direction) > 0 else "CCW"
+                self.node.get_logger().info(
+                    f"{self.name}: state={self.state.name} sweep={self.completion_count} "
+                    f"dir={direction} closest={self._closest_360:.2f}m "
+                    f"scans={self._scan_count}"
+                )
+
+            # Emergency cooldown
+            if now < self._emergency_until:
+                self.state = MotionState.PAUSED
+                return
+
+            # Master switch
+            if not rotating:
+                self._stop()
+                self.state = MotionState.IDLE
+                self.rotation_progress = 0.0
+                return
+
+            # Person too close → pause
+            if self._is_close:
+                self._stop()
+                self.state = MotionState.PAUSED
+                self._resume_until = 0.0  # Reset so next resume gets fresh delay
+                return
+
+            # Resume from pause — soft start with 1s delay
+            if self.state in (MotionState.IDLE, MotionState.PAUSED):
+                if self._resume_until == 0.0:
+                    self._resume_until = now + 1.0
+                if now < self._resume_until:
+                    return  # Wait before moving
+                self._resume_until = 0.0
+                self.state = MotionState.MOVING
+
+            # Turn around pause between sweeps
+            if self.state == MotionState.TURN_AROUND:
+                if now >= self._turn_around_until:
+                    self.completion_count += 1
+                    self.rotation_progress = 0.0
+                    self.state = MotionState.MOVING
+                    self.node.get_logger().info(
+                        f"{self.name}: sweep {self.completion_count} starting"
+                    )
+                return
+
+            # Normal motion
+            omega = self._calc_omega()
+            step = abs(omega) * dt
+            remaining = self.motion.ROTATION_ANGLE - self.rotation_progress
+            self.rotation_progress += min(step, remaining)
+
+            if self.rotation_progress >= self.motion.ROTATION_ANGLE:
+                self.rotation_progress = self.motion.ROTATION_ANGLE
+                self.state = MotionState.TURN_AROUND
+                self._turn_around_until = now + 1.0
+                self._stop()
+                self.node.get_logger().info(
+                    f"{self.name}: sweep done, reversing in 1s"
+                )
+                return
+
+            self._publish(omega)
+
+    def _calc_omega(self):
+        base = self.motion.ROTATION_ANGLE / self.motion.HALF_SWEEP_DURATION
+        direction = self.direction if self.completion_count % 2 == 0 else -self.direction
+        raw = direction * base
+
+        if raw > 0:
+            return max(self.motion.MIN_ANGULAR_SPEED,
+                       min(raw, self.motion.MAX_ANGULAR_SPEED))
+        else:
+            return min(-self.motion.MIN_ANGULAR_SPEED,
+                       max(raw, -self.motion.MAX_ANGULAR_SPEED))
+
+    def _publish(self, target):
+        delta = max(-self._max_domega, min(self._max_domega, target - self._last_omega))
+        omega = self._last_omega + delta
+        self._last_omega = omega
+        msg = Twist()
+        msg.angular.z = omega
+        self.cmd_pub.publish(msg)
+        stamped = TwistStamped()
+        stamped.twist.angular.z = omega
+        self.cmd_stamped_pub.publish(stamped)
+
+    def _stop(self):
+        self._last_omega = 0.0
+        self.cmd_pub.publish(Twist())
+        self.cmd_stamped_pub.publish(TwistStamped())
+
+    def emergency_stop(self):
+        self._stop()
+        self.state = MotionState.IDLE
+        self.rotation_progress = 0.0
 
 
 class Phase1Controller(Node):
-    """System orchestrator for Phase 1 clock movement."""
 
     def __init__(self):
         super().__init__("phase1_controller")
 
-        # Allow runtime overrides from launch parameters (keeps dataclass defaults)
-        default_profile = Phase1Profile()
-        # Declare parameters with defaults from the dataclass
-        self.declare_parameter("linear_speed", default_profile.LINEAR_SPEED)
-        self.declare_parameter("target_radius", default_profile.TARGET_RADIUS)
-        self.declare_parameter("rotation_angle", default_profile.ROTATION_ANGLE)
-        self.declare_parameter("distance_stop", default_profile.DISTANCE_STOP)
-        self.declare_parameter("distance_far", default_profile.DISTANCE_FAR)
-        self.declare_parameter("far_hysteresis", default_profile.FAR_HYSTERESIS)
-        self.declare_parameter("stop_hysteresis", default_profile.STOP_HYSTERESIS)
-        self.declare_parameter("speed_scale_normal", default_profile.SPEED_SCALE_NORMAL)
-        self.declare_parameter("speed_scale_stop", default_profile.SPEED_SCALE_STOP)
-        self.declare_parameter(
-            "half_circle_duration", default_profile.HALF_CIRCLE_DURATION
-        )
-        self.declare_parameter("total_duration", default_profile.TOTAL_DURATION)
-        self.declare_parameter("control_rate", default_profile.CONTROL_RATE)
-        self.declare_parameter("ramp_fraction", default_profile.RAMP_FRACTION)
-        self.declare_parameter("min_angular_speed", default_profile.MIN_ANGULAR_SPEED)
-        self.declare_parameter("max_angular_speed", default_profile.MAX_ANGULAR_SPEED)
-        self.declare_parameter(
-            "distance_smooth_alpha", default_profile.DISTANCE_SMOOTH_ALPHA
-        )
-        self.declare_parameter(
-            "audience_min_hold_sec", default_profile.AUDIENCE_MIN_HOLD_SEC
-        )
-        self.declare_parameter("far_min_hold_sec", default_profile.FAR_MIN_HOLD_SEC)
-        self.declare_parameter("auto_start", False)
-        self.declare_parameter("scan_topic", "scan_new")
-        self.declare_parameter("scan_sector_deg", 120.0)
+        self.motion, self.safety = load_parameters(self)
+
+        self.get_logger().info("=== Phase 1 Configuration ===")
+        self.get_logger().info(f"  Safety stop: < {self.safety.CLOSE_STOP}m (360°)")
+        self.get_logger().info(f"  Safety resume: > {self.safety.CLOSE_RESUME}m")
+        self.get_logger().info(f"  Rotation: {math.degrees(self.motion.ROTATION_ANGLE):.1f} deg")
+        self.get_logger().info(f"  Speed: {self.motion.MIN_ANGULAR_SPEED}-{self.motion.MAX_ANGULAR_SPEED} rad/s")
+        self.get_logger().info(f"  Sweep duration: {self.motion.HALF_SWEEP_DURATION}s")
+        self.get_logger().info(f"  Total duration: {self.motion.TOTAL_DURATION}s")
+
         self.declare_parameter("robots", "Moon")
+        robots = self.get_parameter("robots").value
+        names = [s.strip() for s in robots.split(",") if s.strip()]
 
-        # Read parameters and construct profile
-        self.profile = Phase1Profile(
-            LINEAR_SPEED=self.get_parameter("linear_speed").value,
-            TARGET_RADIUS=self.get_parameter("target_radius").value,
-            ROTATION_ANGLE=self.get_parameter("rotation_angle").value,
-            DISTANCE_STOP=self.get_parameter("distance_stop").value,
-            DISTANCE_FAR=self.get_parameter("distance_far").value,
-            FAR_HYSTERESIS=self.get_parameter("far_hysteresis").value,
-            STOP_HYSTERESIS=self.get_parameter("stop_hysteresis").value,
-            SPEED_SCALE_NORMAL=self.get_parameter("speed_scale_normal").value,
-            SPEED_SCALE_STOP=self.get_parameter("speed_scale_stop").value,
-            HALF_CIRCLE_DURATION=self.get_parameter("half_circle_duration").value,
-            TOTAL_DURATION=self.get_parameter("total_duration").value,
-            CONTROL_RATE=self.get_parameter("control_rate").value,
-            RAMP_FRACTION=self.get_parameter("ramp_fraction").value,
-            MIN_ANGULAR_SPEED=self.get_parameter("min_angular_speed").value,
-            MAX_ANGULAR_SPEED=self.get_parameter("max_angular_speed").value,
-            DISTANCE_SMOOTH_ALPHA=self.get_parameter("distance_smooth_alpha").value,
-            AUDIENCE_MIN_HOLD_SEC=self.get_parameter("audience_min_hold_sec").value,
-            FAR_MIN_HOLD_SEC=self.get_parameter("far_min_hold_sec").value,
-        )
+        config = {"Moon": ("Moon", 1), "Basin": ("Basin", -1)}
 
-        scan_topic = self.get_parameter("scan_topic").value
-        scan_sector_deg = self.get_parameter("scan_sector_deg").value
-        robot_names = self.get_parameter("robots").value
-        if isinstance(robot_names, str):
-            robot_names = [s.strip() for s in robot_names.split(",") if s.strip()] or [
-                "Moon"
-            ]
-        elif not isinstance(robot_names, list):
-            robot_names = [robot_names] if robot_names else ["Moon"]
-        # Name -> (namespace, direction): Moon CW (+1), Basin CCW (-1); same speed for both
-        robot_config = {"Moon": ("Moon", 1), "Basin": ("Basin", -1)}
         self.robots = {}
-        for name in robot_names:
-            if name not in robot_config:
-                self.get_logger().warn(
-                    f"Unknown robot '{name}', skipping. Known: Moon, Basin."
-                )
-                continue
-            ns, direction = robot_config[name]
+        scan_topic = self.get_parameter("scan_topic").value
+        for name in names:
+            ns, direction = config[name]
             self.robots[name] = Phase1Robot(
-                name,
-                ns,
-                direction,
-                self,
-                self.profile,
-                scan_topic,
-                scan_sector_deg,
+                name, ns, direction, self,
+                self.motion, self.safety, scan_topic
             )
-        if not self.robots:
-            raise ValueError(
-                "No valid robots configured. Use robots:=['Moon'] or robots:=['Moon','Basin']"
+            self.get_logger().info(
+                f"  Robot '{name}': ns={ns}, dir={'CW' if direction > 0 else 'CCW'}, "
+                f"scan=/{ns}/{scan_topic}"
             )
 
         self.rotating = False
         self.start_time = None
 
-        self.control_timer = self.create_timer(
-            1.0 / self.profile.CONTROL_RATE, self._control_loop
-        )
+        # Duty cycle
+        self.duty_cycle = self.get_parameter("duty_cycle").value
+        self.active_duration = self.get_parameter("active_duration").value
+        self.rest_duration = self.get_parameter("rest_duration").value
+        self._duty_state = "idle"  # idle, starting, active, resting
+        self._duty_timer = 0.0
 
-        auto_start = self.get_parameter("auto_start").value
-        if auto_start:
-            self.get_logger().info("Auto-start: rotation will begin in 3s...")
-            self.create_timer(3.0, self._auto_start_once)
+        self.create_timer(1.0 / self.motion.CONTROL_RATE, self._loop)
 
-        self.get_logger().info("=" * 60)
-        self.get_logger().info("PHASE 1: CLOCK MOVEMENT CONTROLLER")
-        self.get_logger().info("=" * 60)
-        if "Moon" in self.robots:
-            self.get_logger().info("🌙 Moon: Clockwise")
-        if "Basin" in self.robots:
-            self.get_logger().info("🪨 Basin: Counter-clockwise")
-        self.get_logger().info(
-            f"Duration: {self.profile.TOTAL_DURATION}s | "
-            f"Full circle every {self.profile.HALF_CIRCLE_DURATION}s (clock: alternate direction each lap)"
-        )
-        scan_topic = self.get_parameter("scan_topic").value
-        sector = self.get_parameter("scan_sector_deg").value
-        far_idle = self.profile.DISTANCE_FAR + self.profile.FAR_HYSTERESIS
-        self.get_logger().info(
-            f"Audience: move {self.profile.DISTANCE_STOP*100:.0f}–{self.profile.DISTANCE_FAR*100:.0f}cm, "
-            f"idle when <{self.profile.DISTANCE_STOP*100:.0f}cm or >{far_idle*100:.0f}cm (hysteresis)"
-        )
-        self.get_logger().info(
-            f"Rotation speed: {self.profile.MAX_ANGULAR_SPEED:.3f} rad/s (semicircle in ~{math.pi / self.profile.MAX_ANGULAR_SPEED:.0f}s)"
-        )
-        self.get_logger().info("")
-        self.get_logger().info("Commands:")
-        self.get_logger().info(
-            "  [Enter] - START rotation (only when run with 'ros2 run' in a terminal)"
-        )
-        self.get_logger().info("  [s]     - STOP  [q] - QUIT")
-        self.get_logger().info(
-            '  Or call service: ros2 service call /phase1_controller/start std_srvs/srv/Empty "{}"'
-        )
-        self.get_logger().info("=" * 60)
-
-        self._fallback_start_timer = None
-        if not sys.stdin.isatty() and not auto_start:
+        if self.duty_cycle:
             self.get_logger().info(
-                "No terminal input - rotation will auto-start in 5s (or call start service now)."
+                f"  Duty cycle: {self.active_duration:.0f}s active / "
+                f"{self.rest_duration:.0f}s rest"
             )
-            self._fallback_start_timer = self.create_timer(5.0, self._auto_start_once)
+            self.create_timer(1.0, self._duty_loop)
 
-        self.input_thread = threading.Thread(target=self._input_loop, daemon=True)
-        self.input_thread.start()
+        self._auto_start_timer = None
+        if self.get_parameter("auto_start").value:
+            self._auto_start_timer = self.create_timer(3.0, self._auto_start)
 
-    def _auto_start_once(self):
-        """One-shot: start rotation (used when auto_start is true or no-TTY fallback)."""
+        threading.Thread(target=self._input_loop, daemon=True).start()
+        self.get_logger().info("Phase 1 ready. [Enter]=start, s=stop, q=quit")
+
+    def _duty_loop(self):
+        """Manages the duty cycle: rest → start lidar → move → stop → rest."""
+        now = time.time()
+
+        if self._duty_state == "idle":
+            # First cycle: start lidar and begin
+            self._duty_state = "starting"
+            self._duty_timer = now
+            self.get_logger().info("Duty cycle: starting lidar...")
+            for r in self.robots.values():
+                r.start_lidar()
+
+        elif self._duty_state == "starting":
+            # Wait for scan data before moving (max 30s)
+            all_ready = all(r._scan_count > 0 for r in self.robots.values())
+            if all_ready or (now - self._duty_timer > 30.0):
+                self._duty_state = "active"
+                self._duty_timer = now
+                self.rotating = True
+                self.start_time = now
+                ready = sum(1 for r in self.robots.values() if r._scan_count > 0)
+                self.get_logger().info(
+                    f"Duty cycle: ACTIVE ({ready}/{len(self.robots)} robots with scans)"
+                )
+
+        elif self._duty_state == "active":
+            if now - self._duty_timer >= self.active_duration:
+                self._duty_state = "resting"
+                self._duty_timer = now
+                self.rotating = False
+                for r in self.robots.values():
+                    r.emergency_stop()
+                    r.stop_lidar()
+                self.get_logger().info(
+                    f"Duty cycle: RESTING for {self.rest_duration:.0f}s (lidar off)"
+                )
+
+        elif self._duty_state == "resting":
+            if now - self._duty_timer >= self.rest_duration:
+                self._duty_state = "starting"
+                self._duty_timer = now
+                self.get_logger().info("Duty cycle: starting lidar...")
+                for r in self.robots.values():
+                    r.start_lidar()
+
+    def _auto_start(self):
+        self.rotating = True
+        self.start_time = time.time()
+        self.get_logger().info("Auto-start: rotation started")
+        if self._auto_start_timer:
+            self._auto_start_timer.cancel()
+            self._auto_start_timer = None
+
+    def _loop(self):
         if not self.rotating:
-            self.get_logger().info("  Auto-starting Phase 1...")
-            self.rotating = True
-            self.start_time = time.time()
-        if getattr(self, "_fallback_start_timer", None) is not None:
-            self._fallback_start_timer.cancel()
-            self._fallback_start_timer = None
-
-    def _control_loop(self):
-        """Main control loop."""
-        if not self.rotating or self.start_time is None:
             return
-
-        elapsed = time.time() - self.start_time
-
-        # Check if total duration exceeded
-        if elapsed > self.profile.TOTAL_DURATION:
-            self.get_logger().info("Phase 1 complete!")
+        if not self.duty_cycle and time.time() - self.start_time > self.motion.TOTAL_DURATION:
             self.rotating = False
-            for robot in self.robots.values():
-                robot.emergency_stop()
+            for r in self.robots.values():
+                r.emergency_stop()
+            self.get_logger().info("Total duration reached, stopping.")
             return
-
-        # Update all robots
-        dt = 1.0 / self.profile.CONTROL_RATE
-        for robot in self.robots.values():
-            robot.update(self.rotating, elapsed, dt)
+        dt = 1.0 / self.motion.CONTROL_RATE
+        for r in self.robots.values():
+            r.update(self.rotating, dt)
 
     def _input_loop(self):
-        """Handle user commands."""
         while rclpy.ok():
             try:
                 cmd = input().strip().lower()
-
                 if cmd == "":
-                    if self.rotating:
-                        self.get_logger().info("Already rotating...")
-                    else:
-                        self.get_logger().info("  Starting Phase 1...")
-                        self.rotating = True
-                        self.start_time = time.time()
-
+                    self.rotating = True
+                    self.start_time = time.time()
+                    self.get_logger().info("Manual start")
                 elif cmd == "s":
-                    self.get_logger().info("Stopping rotation...")
                     self.rotating = False
-                    for robot in self.robots.values():
-                        robot.emergency_stop()
-
-                elif cmd == "status":
-                    for robot in self.robots.values():
-                        status = robot.get_status()
-                        self.get_logger().info(
-                            f"{status['name']}: {status['state']} | "
-                            f"Distance: {status['distance']:.2f}m | "
-                            f"Pauses: {status['pauses']}"
-                        )
-
+                    for r in self.robots.values():
+                        r.emergency_stop()
+                    self.get_logger().info("Manual stop")
                 elif cmd == "q":
-                    self.get_logger().info("Quitting...")
                     rclpy.shutdown()
                     break
-
             except EOFError:
                 break
 
 
-def main(args=None):
-    rclpy.init(args=args)
-    controller = Phase1Controller()
+def main():
+    rclpy.init()
+    node = Phase1Controller()
+
+    def _shutdown(sig=None, frame=None):
+        node.get_logger().info("Shutting down — stopping all robots")
+        for r in node.robots.values():
+            r.emergency_stop()
+        rclpy.shutdown()
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
 
     try:
-        rclpy.spin(controller)
-    except KeyboardInterrupt:
+        rclpy.spin(node)
+    except Exception:
         pass
     finally:
-        controller.destroy_node()
+        for r in node.robots.values():
+            r.emergency_stop()
+        node.destroy_node()
         rclpy.try_shutdown()
 
 

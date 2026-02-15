@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# moon_slam.launch.py - LifecycleNode with auto-configure/activate
+# basin_slam.launch.py - LifecycleNode with auto-configure/activate
 
 import os
 
@@ -15,22 +15,22 @@ from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
     robots_share = get_package_share_directory("robots")
-    params_file = os.path.join(robots_share, "config", "moon_slam.yaml")
+    params_file = os.path.join(robots_share, "config", "basin_slam.yaml")
 
     slam_toolbox_node = LifecycleNode(
         package="slam_toolbox",
         executable="sync_slam_toolbox_node",
         name="slam_toolbox",
-        namespace="Moon",
+        namespace="Basin",
         output="screen",
         parameters=[
             params_file,
             {
                 "use_sim_time": False,
                 "scan_topic": "scan_new",
-                "map_frame": "Moon/map",
-                "odom_frame": "Moon/odom",
-                "base_frame": "Moon/base_link",
+                "map_frame": "Basin/map",
+                "odom_frame": "Basin/odom",
+                "base_frame": "Basin/base_link",
                 "transform_tolerance": 10.0,
                 "minimum_time_interval": 2.0,
                 "throttle_scans": 5,

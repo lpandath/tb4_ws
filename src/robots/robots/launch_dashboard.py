@@ -32,19 +32,18 @@ _log_files: dict = {}
 
 # Launch names shown in UI -> (launch_file, description)
 LAUNCHES = {
-    "phase1": ("phase1.launch.py", "Phase 1 (clock swing)"),
-    "moon_bringup": ("moon_bringup.launch.py", "Moon bringup: scan → relay → localisation (no nav)"),
-    "moon_navigation": ("moon_navigation.launch.py", "Moon navigation"),
-    "basin_scan": ("basin_scan.launch.py", "Basin scan + odom TF"),
+    "phase1_full": ("phase1_full.launch.py", "Phase 1 Full (scan + swing, both robots)"),
+    "phase1": ("phase1.launch.py", "Phase 1 (swing only, no scan)"),
+    "moon_scan": ("moon_scan.launch.py", "Moon scan corrector"),
+    "basin_scan": ("basin_scan.launch.py", "Basin scan corrector"),
+    "moon_bringup": ("moon_bringup.launch.py", "Moon bringup: scan + relay + localisation"),
     "basin_relay": ("basin_relay.launch.py", "Basin TF relay"),
-    "basin_localization": ("basin_localization.launch.py", "Basin localization"),
-    "basin_navigation": ("basin_navigation.launch.py", "Basin navigation"),
     "phase2_circle": ("phase2_circle.launch.py", "Phase 2 circle"),
 }
 
 # Scan and relay run in background (multiple at once) so movements work.
 # Moon scan/relay are started via moon_bringup, so only Basin has standalone background entries.
-BACKGROUND_LAUNCHES = {"basin_scan", "basin_relay"}
+BACKGROUND_LAUNCHES = {"moon_scan", "basin_scan", "basin_relay"}
 
 _foreground_process = None
 _foreground_name: Optional[str] = None

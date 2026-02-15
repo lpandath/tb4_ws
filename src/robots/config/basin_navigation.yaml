@@ -30,13 +30,13 @@ Basin:
       min_x_velocity_threshold: 0.01
       min_y_velocity_threshold: 0.01
       min_theta_velocity_threshold: 0.05
-      failure_tolerance: 0.3
+      failure_tolerance: 1.0
       progress_checker_plugin: progress_checker
       goal_checker_plugins: [goal_checker]
       controller_plugins: [FollowPath]
       odom_topic: odom
       publish_odom_to_base_tf: false
-      costmap_update_timeout: 0.5
+      costmap_update_timeout: 5.0
       publish_velocity_to_odom_tf: false
       progress_checker:
         plugin: nav2_controller::SimpleProgressChecker

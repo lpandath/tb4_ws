@@ -35,20 +35,28 @@ class LaserScanFrameCorrector(Node):
         }
         self._warned_frames = set()
 
-        qos_profile = QoSProfile(
+        # Subscribe with BEST_EFFORT (matches robot's lidar publisher)
+        sub_qos = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             durability=QoSDurabilityPolicy.VOLATILE,
-            depth=1,
+            depth=10,
+        )
+
+        # Publish with RELIABLE so AMCL and other nav2 nodes can receive scans
+        pub_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.VOLATILE,
+            depth=10,
         )
 
         self.subscription = self.create_subscription(
             LaserScan,
             "scan",
             self.scan_callback,
-            qos_profile,
+            sub_qos,
         )
         self.publisher = self.create_publisher(
-            LaserScan, "scan_new", qos_profile
+            LaserScan, "scan_new", pub_qos
         )
 
         self.get_logger().info(
