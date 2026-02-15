@@ -17,6 +17,7 @@ from launch_ros.actions import Node
 def _launch(context, *args, **kwargs):
     robots_str = context.perform_substitution(LaunchConfiguration("robots"))
     speed = float(context.perform_substitution(LaunchConfiguration("speed")))
+    angle = float(context.perform_substitution(LaunchConfiguration("rotation_angle")))
     duty = context.perform_substitution(LaunchConfiguration("duty_cycle")).lower() == "true"
 
     return [
@@ -28,7 +29,7 @@ def _launch(context, *args, **kwargs):
             parameters=[
                 {"robots": robots_str},
                 {"scan_topic": "scan"},
-                {"rotation_angle": 2.79},
+                {"rotation_angle": angle},
                 {"max_angular_speed": speed},
                 {"min_angular_speed": speed * 0.5},
                 {"max_accel_angular": 0.04},
@@ -50,7 +51,9 @@ def generate_launch_description():
                               description="Moon, Basin, or Moon,Basin"),
         DeclareLaunchArgument("speed", default_value="0.06",
                               description="Max angular speed (rad/s)"),
-        DeclareLaunchArgument("duty_cycle", default_value="false",
+        DeclareLaunchArgument("rotation_angle", default_value="2.79",
+                              description="Sweep angle in radians (2.79=160deg, 1.57=90deg)"),
+        DeclareLaunchArgument("duty_cycle", default_value="true",
                               description="Enable duty cycle (true/false)"),
         OpaqueFunction(function=_launch),
     ])

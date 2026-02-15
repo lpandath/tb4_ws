@@ -485,12 +485,7 @@ class Phase1Controller(Node):
     def _loop(self):
         if not self.rotating:
             return
-        if not self.duty_cycle and time.time() - self.start_time > self.motion.TOTAL_DURATION:
-            self.rotating = False
-            for r in self.robots.values():
-                r.emergency_stop()
-            self.get_logger().info("Total duration reached, stopping.")
-            return
+        pass  # No duration limit — duty cycle or manual stop controls lifetime
         dt = 1.0 / self.motion.CONTROL_RATE
         for r in self.robots.values():
             r.update(self.rotating, dt)

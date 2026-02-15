@@ -1,0 +1,11 @@
+digraph G {
+"map" -> "Moon/map"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"Moon/wheel_drop_left" -> "Moon/left_wheel"[label=" Broadcaster: default_authority\nAverage rate: 1.733\nBuffer length: 1.154\nMost recent transform: 1771091866.845308\nOldest transform: 1771091865.691117\n"];
+"Moon/base_link" -> "Moon/wheel_drop_left"[label=" Broadcaster: default_authority\nAverage rate: 1.733\nBuffer length: 1.154\nMost recent transform: 1771091866.845308\nOldest transform: 1771091865.691117\n"];
+"Moon/wheel_drop_right" -> "Moon/right_wheel"[label=" Broadcaster: default_authority\nAverage rate: 1.733\nBuffer length: 1.154\nMost recent transform: 1771091866.845308\nOldest transform: 1771091865.691117\n"];
+"Moon/base_link" -> "Moon/wheel_drop_right"[label=" Broadcaster: default_authority\nAverage rate: 1.733\nBuffer length: 1.154\nMost recent transform: 1771091866.845308\nOldest transform: 1771091865.691117\n"];
+edge [style=invis];
+ subgraph cluster_legend { style=bold; color=black; label ="view_frames Result";
+"Recorded at time: 1771091867.9029636"[ shape=plaintext ] ;
+}->"Moon/base_link";
+}
