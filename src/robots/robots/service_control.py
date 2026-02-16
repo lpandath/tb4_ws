@@ -14,16 +14,11 @@ Endpoints:
 import json
 import socket
 import subprocess
-import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
 PORT = 8090
 SERVICE = "phase1"
-
-# Track background start/stop operations
-_pending_action = None  # "starting" or "stopping"
-_action_lock = threading.Lock()
 
 
 def get_robot_name():
@@ -32,7 +27,6 @@ def get_robot_name():
         with open("/etc/systemd/system/phase1.service") as f:
             for line in f:
                 if "robots:=" in line:
-                    # Extract name from e.g. "robots:=Moon" or "robots:=Basin"
                     part = line.split("robots:=")[1]
                     return part.strip().strip("'\"")
     except Exception:
@@ -40,58 +34,25 @@ def get_robot_name():
     return socket.gethostname()
 
 
-def service_status():
-    """Return status string: 'active', 'activating', 'deactivating', 'inactive'."""
+def service_state():
+    """Return systemd state: 'active', 'activating', 'deactivating', 'inactive', etc."""
     result = subprocess.run(
         ["systemctl", "is-active", SERVICE],
         capture_output=True, text=True, timeout=10,
     )
-    state = result.stdout.strip()  # "active", "inactive", "activating", etc.
-    return state
-
-
-def _do_start():
-    global _pending_action
-    try:
-        subprocess.run(
-            ["systemctl", "start", SERVICE],
-            capture_output=True, text=True, timeout=120,
-        )
-    finally:
-        with _action_lock:
-            _pending_action = None
-
-
-def _do_stop():
-    global _pending_action
-    try:
-        subprocess.run(
-            ["systemctl", "stop", SERVICE],
-            capture_output=True, text=True, timeout=60,
-        )
-    finally:
-        with _action_lock:
-            _pending_action = None
+    return result.stdout.strip()
 
 
 def service_start():
-    global _pending_action
-    with _action_lock:
-        if _pending_action:
-            return False
-        _pending_action = "starting"
-    threading.Thread(target=_do_start, daemon=True).start()
-    return True
+    """Fire and forget — Popen returns immediately."""
+    subprocess.Popen(["systemctl", "start", SERVICE],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def service_stop():
-    global _pending_action
-    with _action_lock:
-        if _pending_action:
-            return False
-        _pending_action = "stopping"
-    threading.Thread(target=_do_stop, daemon=True).start()
-    return True
+    """Fire and forget — Popen returns immediately."""
+    subprocess.Popen(["systemctl", "stop", SERVICE],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 # Uses the same CSS variables and visual style as the existing dashboard
@@ -328,17 +289,24 @@ function hideDialog() {{
 }}
 
 async function doAction() {{
-    hideDialog();
     const action = pendingAction;
+    hideDialog();
     if (!action) return;
     document.getElementById('error').textContent = '';
+    // Immediate visual feedback
+    const dot = document.getElementById('dot');
+    const text = document.getElementById('status-text');
+    document.getElementById('btn-enable').disabled = true;
+    document.getElementById('btn-disable').disabled = true;
+    if (action === 'start') {{
+        dot.className = 'dot starting';
+        text.textContent = 'Starting...';
+    }} else {{
+        dot.className = 'dot';
+        text.textContent = 'Stopping...';
+    }}
     try {{
-        const resp = await fetch('/' + action, {{ method: 'POST' }});
-        if (!resp.ok) {{
-            const data = await resp.json();
-            document.getElementById('error').textContent = data.error || 'Request failed';
-        }}
-        await refreshStatus();
+        await fetch('/' + action, {{ method: 'POST' }});
     }} catch (e) {{
         document.getElementById('error').textContent = 'Connection error';
     }}
@@ -394,13 +362,10 @@ class Handler(BaseHTTPRequestHandler):
             html = HTML_PAGE.format(robot_name=get_robot_name())
             self._respond(200, "text/html", html.encode())
         elif self.path == "/status":
-            state = service_status()
-            with _action_lock:
-                pending = _pending_action
-            # Map to a simple status the UI understands
-            if pending == "starting" or state == "activating":
+            state = service_state()
+            if state == "activating":
                 ui_state = "starting"
-            elif pending == "stopping" or state == "deactivating":
+            elif state == "deactivating":
                 ui_state = "stopping"
             elif state == "active":
                 ui_state = "running"
@@ -416,17 +381,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == "/start":
-            ok = service_start()
-            self._respond(
-                200, "application/json",
-                json.dumps({"ok": ok}).encode(),
-            )
+            service_start()
+            self._respond(200, "application/json", json.dumps({"ok": True}).encode())
         elif self.path == "/stop":
-            ok = service_stop()
-            self._respond(
-                200, "application/json",
-                json.dumps({"ok": ok}).encode(),
-            )
+            service_stop()
+            self._respond(200, "application/json", json.dumps({"ok": True}).encode())
         else:
             self._respond(404, "text/plain", b"Not Found")
 
@@ -434,6 +393,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 

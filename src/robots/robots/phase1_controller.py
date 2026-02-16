@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-PHASE 1: CLOCK MOVEMENT CONTROLLER (ANNUAL CLOCK)
-=================================================
-- Robot always swings ~160 degrees back and forth (like a pendulum)
-- Stops ONLY when someone is within 80cm (360° safety detection)
-- Resumes when person moves away beyond 90cm
+PHASE 1: EXHIBITION DANCE CONTROLLER
+=====================================
+Two-phase dance alternating each duty cycle:
+  1. FULL_ROTATION — continuous 360° spinning (1.5 min)
+  2. OSCILLATION   — 180° back-and-forth sweeps (1.5 min)
+Each phase followed by 8 min rest. Mirroring handled by config.
 """
 
 import math
@@ -25,6 +26,11 @@ SCAN_TIMEOUT = 10.0      # Stop robot if no scan data for this many seconds
 SCAN_RESUBSCRIBE = 15.0  # Re-create subscription to force DDS re-discovery
 
 
+class DancePhase(Enum):
+    FULL_ROTATION = auto()  # Continuous 360° spinning
+    OSCILLATION = auto()    # 180° back-and-forth sweeps
+
+
 class MotionState(Enum):
     IDLE = auto()
     MOVING = auto()
@@ -34,12 +40,12 @@ class MotionState(Enum):
 
 @dataclass(frozen=True)
 class MotionProfile:
-    ROTATION_ANGLE: float = 2.79       # ~160 degrees
+    ROTATION_ANGLE: float = 3.14       # 180 degrees (oscillation sweep)
     HALF_SWEEP_DURATION: float = 300.0 # Seconds per sweep (5 min)
     TOTAL_DURATION: float = 600.0      # Total run time (10 min)
-    MAX_ANGULAR_SPEED: float = 0.06    # rad/s
-    MIN_ANGULAR_SPEED: float = 0.01    # rad/s (smooth start)
-    MAX_ACCEL_ANGULAR: float = 0.04    # Smooth acceleration
+    MAX_ANGULAR_SPEED: float = 0.08    # rad/s
+    MIN_ANGULAR_SPEED: float = 0.02    # rad/s (smooth start)
+    MAX_ACCEL_ANGULAR: float = 0.02    # Smooth acceleration
     CONTROL_RATE: float = 25.0         # Hz
 
 
@@ -55,19 +61,19 @@ class SafetyProfile:
 def load_parameters(node: Node):
     node.declare_parameter("close_stop", 0.80)
     node.declare_parameter("close_resume", 0.90)
-    node.declare_parameter("rotation_angle", 2.79)
+    node.declare_parameter("rotation_angle", 3.14)
     node.declare_parameter("half_sweep_duration", 300.0)
     node.declare_parameter("total_duration", 600.0)
-    node.declare_parameter("max_angular_speed", 0.06)
-    node.declare_parameter("min_angular_speed", 0.03)
-    node.declare_parameter("max_accel_angular", 0.04)
+    node.declare_parameter("max_angular_speed", 0.08)
+    node.declare_parameter("min_angular_speed", 0.02)
+    node.declare_parameter("max_accel_angular", 0.02)
     node.declare_parameter("control_rate", 25.0)
     node.declare_parameter("lidar_min_range", 0.15)
     node.declare_parameter("lidar_max_range", 5.0)
     node.declare_parameter("scan_topic", "scan")
     node.declare_parameter("auto_start", False)
     node.declare_parameter("duty_cycle", False)
-    node.declare_parameter("active_duration", 120.0)    # 2 min moving
+    node.declare_parameter("active_duration", 90.0)     # 1.5 min moving
     node.declare_parameter("rest_duration", 480.0)     # 8 min rest
 
     motion = MotionProfile(
@@ -92,8 +98,9 @@ def load_parameters(node: Node):
 
 class Phase1Robot:
     """
-    Controls ONE robot. Always swings back and forth.
-    Only stops when 360° lidar detects someone within 50cm.
+    Controls ONE robot. Operates in two modes set by continuous_rotation:
+    - True: continuous 360° spinning (no reversal)
+    - False: back-and-forth oscillation sweeps
     """
 
     def __init__(self, name, namespace, direction, node, motion, safety, scan_topic):
@@ -111,6 +118,8 @@ class Phase1Robot:
         self.state = MotionState.IDLE
         self.rotation_progress = 0.0
         self.completion_count = 0
+        self.sweep_angle = motion.ROTATION_ANGLE  # Set by controller each duty cycle
+        self.continuous_rotation = False  # Set by controller per dance phase
 
         # Safety: closest object in 360°
         self._closest_360 = float("inf")
@@ -272,21 +281,27 @@ class Phase1Robot:
             # Periodic status log (every 30s)
             if now - self._last_status_time >= 30.0:
                 self._last_status_time = now
-                direction = "CW" if (self.direction if self.completion_count % 2 == 0 else -self.direction) > 0 else "CCW"
+                if self.continuous_rotation:
+                    direction = "CW" if self.direction > 0 else "CCW"
+                    mode = "SPIN"
+                else:
+                    direction = "CW" if (self.direction if self.completion_count % 2 == 0 else -self.direction) > 0 else "CCW"
+                    mode = "OSC"
                 self.node.get_logger().info(
-                    f"{self.name}: state={self.state.name} sweep={self.completion_count} "
+                    f"{self.name}: state={self.state.name} mode={mode} sweep={self.completion_count} "
                     f"dir={direction} closest={self._closest_360:.2f}m "
                     f"scans={self._scan_count}"
                 )
 
             # Emergency cooldown
             if now < self._emergency_until:
+                self._stop()  # Continuously override any stray commands
                 self.state = MotionState.PAUSED
                 return
 
             # Master switch
             if not rotating:
-                self._stop()
+                self._stop()  # Continuously override any stray commands
                 self.state = MotionState.IDLE
                 self.rotation_progress = 0.0
                 return
@@ -303,12 +318,14 @@ class Phase1Robot:
                 if self._resume_until == 0.0:
                     self._resume_until = now + 1.0
                 if now < self._resume_until:
-                    return  # Wait before moving
+                    self._stop()  # Continuously override any stray commands
+                    return
                 self._resume_until = 0.0
                 self.state = MotionState.MOVING
 
-            # Turn around pause between sweeps
+            # Turn around pause between sweeps (oscillation only)
             if self.state == MotionState.TURN_AROUND:
+                self._stop()  # Continuously override any stray commands
                 if now >= self._turn_around_until:
                     self.completion_count += 1
                     self.rotation_progress = 0.0
@@ -319,34 +336,50 @@ class Phase1Robot:
                 return
 
             # Normal motion
+            sweep_angle = self.sweep_angle
             omega = self._calc_omega()
             step = abs(omega) * dt
-            remaining = self.motion.ROTATION_ANGLE - self.rotation_progress
+            remaining = sweep_angle - self.rotation_progress
             self.rotation_progress += min(step, remaining)
 
-            if self.rotation_progress >= self.motion.ROTATION_ANGLE:
-                self.rotation_progress = self.motion.ROTATION_ANGLE
-                self.state = MotionState.TURN_AROUND
-                self._turn_around_until = now + 1.0
-                self._stop()
-                self.node.get_logger().info(
-                    f"{self.name}: sweep done, reversing in 1s"
-                )
-                return
+            if self.rotation_progress >= sweep_angle:
+                if self.continuous_rotation:
+                    # Full rotation: reset progress and keep spinning (no pause)
+                    self.completion_count += 1
+                    self.rotation_progress = 0.0
+                    self.node.get_logger().info(
+                        f"{self.name}: 360° rotation #{self.completion_count} complete, continuing"
+                    )
+                else:
+                    # Oscillation: pause and reverse direction
+                    self.rotation_progress = sweep_angle
+                    self.state = MotionState.TURN_AROUND
+                    self._turn_around_until = now + 1.0
+                    self._stop()
+                    self.node.get_logger().info(
+                        f"{self.name}: oscillation sweep done, reversing in 1s"
+                    )
+                    return
 
             self._publish(omega)
 
     def _calc_omega(self):
+        if self.continuous_rotation:
+            # Continuous spin: always same direction, use max speed
+            direction = self.direction
+        else:
+            # Oscillation: alternate direction each sweep
+            direction = self.direction if self.completion_count % 2 == 0 else -self.direction
+
+        max_speed = self.motion.MAX_ANGULAR_SPEED
+        min_speed = self.motion.MIN_ANGULAR_SPEED
         base = self.motion.ROTATION_ANGLE / self.motion.HALF_SWEEP_DURATION
-        direction = self.direction if self.completion_count % 2 == 0 else -self.direction
         raw = direction * base
 
         if raw > 0:
-            return max(self.motion.MIN_ANGULAR_SPEED,
-                       min(raw, self.motion.MAX_ANGULAR_SPEED))
+            return max(min_speed, min(raw, max_speed))
         else:
-            return min(-self.motion.MIN_ANGULAR_SPEED,
-                       max(raw, -self.motion.MAX_ANGULAR_SPEED))
+            return min(-min_speed, max(raw, -max_speed))
 
     def _publish(self, target):
         delta = max(-self._max_domega, min(self._max_domega, target - self._last_omega))
@@ -380,16 +413,14 @@ class Phase1Controller(Node):
         self.get_logger().info("=== Phase 1 Configuration ===")
         self.get_logger().info(f"  Safety stop: < {self.safety.CLOSE_STOP}m (360°)")
         self.get_logger().info(f"  Safety resume: > {self.safety.CLOSE_RESUME}m")
-        self.get_logger().info(f"  Rotation: {math.degrees(self.motion.ROTATION_ANGLE):.1f} deg")
+        self.get_logger().info(f"  Oscillation sweep: {math.degrees(self.motion.ROTATION_ANGLE):.1f} deg")
         self.get_logger().info(f"  Speed: {self.motion.MIN_ANGULAR_SPEED}-{self.motion.MAX_ANGULAR_SPEED} rad/s")
-        self.get_logger().info(f"  Sweep duration: {self.motion.HALF_SWEEP_DURATION}s")
-        self.get_logger().info(f"  Total duration: {self.motion.TOTAL_DURATION}s")
 
         self.declare_parameter("robots", "Moon")
         robots = self.get_parameter("robots").value
         names = [s.strip() for s in robots.split(",") if s.strip()]
 
-        config = {"Moon": ("Moon", 1), "Basin": ("Basin", -1)}
+        config = {"Moon": ("Moon", 1), "Basin": ("Basin", 1)}
 
         self.robots = {}
         scan_topic = self.get_parameter("scan_topic").value
@@ -413,13 +444,16 @@ class Phase1Controller(Node):
         self.rest_duration = self.get_parameter("rest_duration").value
         self._duty_state = "idle"  # idle, starting, active, resting
         self._duty_timer = 0.0
+        self._active_started = False
+        self._duty_cycle_count = 0
+        self._dance_phase = DancePhase.FULL_ROTATION  # Start with spinning
 
         self.create_timer(1.0 / self.motion.CONTROL_RATE, self._loop)
 
         if self.duty_cycle:
             self.get_logger().info(
                 f"  Duty cycle: {self.active_duration:.0f}s active / "
-                f"{self.rest_duration:.0f}s rest"
+                f"{self.rest_duration:.0f}s rest, alternating FULL_ROTATION / OSCILLATION"
             )
             self.create_timer(1.0, self._duty_loop)
 
@@ -431,11 +465,10 @@ class Phase1Controller(Node):
         self.get_logger().info("Phase 1 ready. [Enter]=start, s=stop, q=quit")
 
     def _duty_loop(self):
-        """Manages the duty cycle: rest → start lidar → move → stop → rest."""
+        """Manages the duty cycle with alternating dance phases."""
         now = time.time()
 
         if self._duty_state == "idle":
-            # First cycle: start lidar and begin
             self._duty_state = "starting"
             self._duty_timer = now
             self.get_logger().info("Duty cycle: starting lidar...")
@@ -448,23 +481,43 @@ class Phase1Controller(Node):
             if all_ready or (now - self._duty_timer > 30.0):
                 self._duty_state = "active"
                 self._duty_timer = now
+                self._active_started = False
                 self.rotating = True
                 self.start_time = now
+                # Configure robots for current dance phase
+                is_spinning = self._dance_phase == DancePhase.FULL_ROTATION
+                for r in self.robots.values():
+                    r.continuous_rotation = is_spinning
+                    r.sweep_angle = math.radians(360) if is_spinning else self.motion.ROTATION_ANGLE
                 ready = sum(1 for r in self.robots.values() if r._scan_count > 0)
                 self.get_logger().info(
-                    f"Duty cycle: ACTIVE ({ready}/{len(self.robots)} robots with scans)"
+                    f"Duty cycle #{self._duty_cycle_count}: ACTIVE {self._dance_phase.name} "
+                    f"({ready}/{len(self.robots)} robots with scans)"
                 )
 
         elif self._duty_state == "active":
-            if now - self._duty_timer >= self.active_duration:
+            any_moving = any(r.state == MotionState.MOVING for r in self.robots.values())
+            if not self._active_started and any_moving:
+                self._active_started = True
+                self._duty_timer = now
+                self.get_logger().info("Duty cycle: robot moving, active timer started")
+            if self._active_started and now - self._duty_timer >= self.active_duration:
                 self._duty_state = "resting"
                 self._duty_timer = now
+                self._active_started = False
+                self._duty_cycle_count += 1
                 self.rotating = False
                 for r in self.robots.values():
                     r.emergency_stop()
                     r.stop_lidar()
+                # Toggle dance phase for next cycle
+                if self._dance_phase == DancePhase.FULL_ROTATION:
+                    self._dance_phase = DancePhase.OSCILLATION
+                else:
+                    self._dance_phase = DancePhase.FULL_ROTATION
                 self.get_logger().info(
-                    f"Duty cycle: RESTING for {self.rest_duration:.0f}s (lidar off)"
+                    f"Duty cycle: RESTING for {self.rest_duration:.0f}s (lidar off). "
+                    f"Next phase: {self._dance_phase.name}"
                 )
 
         elif self._duty_state == "resting":
@@ -485,8 +538,10 @@ class Phase1Controller(Node):
 
     def _loop(self):
         if not self.rotating:
+            # Continuously publish zero velocity to prevent drift from stray commands
+            for r in self.robots.values():
+                r._stop()
             return
-        pass  # No duration limit — duty cycle or manual stop controls lifetime
         dt = 1.0 / self.motion.CONTROL_RATE
         for r in self.robots.values():
             r.update(self.rotating, dt)
