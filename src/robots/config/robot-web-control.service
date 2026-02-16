@@ -1,0 +1,12 @@
+[Unit]
+Description=Robot Web Control Panel
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/ubuntu/tb4_ws/src/robots/robots/service_control.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

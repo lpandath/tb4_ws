@@ -24,6 +24,11 @@ setup(
             os.path.join("share", package_name, "config"),
             [os.path.relpath(p, pkg_dir) for p in glob(os.path.join(pkg_dir, "config", "*.yaml"))],
         ),
+        # Include systemd service files
+        (
+            os.path.join("share", package_name, "config"),
+            [os.path.relpath(p, pkg_dir) for p in glob(os.path.join(pkg_dir, "config", "*.service"))],
+        ),
         # Include map files
         (
             os.path.join("share", package_name, "maps"),
@@ -62,6 +67,7 @@ setup(
             "phase2_circle_controller = robots.phase2_circle_controller:main",
             "launch_dashboard = robots.launch_dashboard:main",
             "wait_for_topic = robots.wait_for_topic:main",
+            "service_control = robots.service_control:main",
         ],
     },
 )
