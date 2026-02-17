@@ -169,28 +169,26 @@ class Phase1Robot:
         self._lidar_on = True
 
     def start_lidar(self):
-        """Start lidar motor and re-subscribe to scan data."""
-        if not self._lidar_on:
-            self._lidar_on = True
-            self._scan_count = 0
-            self._last_scan_time = 0.0
-            self._scan_lost = False
-            if self._start_motor_cli.service_is_ready():
-                self._start_motor_cli.call_async(EmptySrv.Request())
-                self.node.get_logger().info(f"{self.name}: lidar motor START")
-            else:
-                self.node.get_logger().warn(f"{self.name}: start_motor service not ready")
-            self._subscribe_scan()
+        """Start lidar motor and re-subscribe to scan data. Idempotent."""
+        self._lidar_on = True
+        self._scan_count = 0
+        self._last_scan_time = 0.0
+        self._scan_lost = False
+        if self._start_motor_cli.service_is_ready():
+            self._start_motor_cli.call_async(EmptySrv.Request())
+            self.node.get_logger().info(f"{self.name}: lidar motor START")
+        else:
+            self.node.get_logger().warn(f"{self.name}: start_motor service not ready")
+        self._subscribe_scan()
 
     def stop_lidar(self):
-        """Stop lidar motor to save battery."""
-        if self._lidar_on:
-            self._lidar_on = False
-            if self._stop_motor_cli.service_is_ready():
-                self._stop_motor_cli.call_async(EmptySrv.Request())
-                self.node.get_logger().info(f"{self.name}: lidar motor STOP (saving battery)")
-            else:
-                self.node.get_logger().warn(f"{self.name}: stop_motor service not ready")
+        """Stop lidar motor to save battery. Idempotent."""
+        self._lidar_on = False
+        if self._stop_motor_cli.service_is_ready():
+            self._stop_motor_cli.call_async(EmptySrv.Request())
+            self.node.get_logger().info(f"{self.name}: lidar motor STOP (saving battery)")
+        else:
+            self.node.get_logger().warn(f"{self.name}: stop_motor service not ready")
 
     def _subscribe_scan(self):
         """Create scan subscriptions. Can be called again to force DDS re-discovery."""
@@ -469,6 +467,14 @@ class Phase1Controller(Node):
                 r.start_lidar()
 
         elif self._duty_state == "starting":
+            # Retry start_lidar every 10s if no scans yet
+            elapsed = now - self._duty_timer
+            if elapsed > 0 and int(elapsed) % 10 == 0 and int(elapsed) != getattr(self, '_last_lidar_retry', -1):
+                self._last_lidar_retry = int(elapsed)
+                for r in self.robots.values():
+                    if r._scan_count == 0:
+                        self.get_logger().warn(f"Retrying lidar start for {r.name}...")
+                        r.start_lidar()
             # Wait for scan data before moving (max 30s)
             all_ready = all(r._scan_count > 0 for r in self.robots.values())
             if all_ready or (now - self._duty_timer > 30.0):
