@@ -44,7 +44,7 @@ class MotionProfile:
     HALF_SWEEP_DURATION: float = 300.0 # Seconds per sweep (5 min)
     TOTAL_DURATION: float = 600.0      # Total run time (10 min)
     MAX_ANGULAR_SPEED: float = 0.08    # rad/s
-    MIN_ANGULAR_SPEED: float = 0.02    # rad/s (smooth start)
+    MIN_ANGULAR_SPEED: float = 0.01    # rad/s (trapezoidal ramp floor)
     MAX_ACCEL_ANGULAR: float = 0.02    # Smooth acceleration
     CONTROL_RATE: float = 25.0         # Hz
 
@@ -65,7 +65,7 @@ def load_parameters(node: Node):
     node.declare_parameter("half_sweep_duration", 300.0)
     node.declare_parameter("total_duration", 600.0)
     node.declare_parameter("max_angular_speed", 0.08)
-    node.declare_parameter("min_angular_speed", 0.02)
+    node.declare_parameter("min_angular_speed", 0.01)
     node.declare_parameter("max_accel_angular", 0.02)
     node.declare_parameter("control_rate", 25.0)
     node.declare_parameter("lidar_min_range", 0.15)
@@ -356,6 +356,10 @@ class Phase1Robot:
                         f"{self.name}: oscillation sweep #{self.completion_count}, reversing"
                     )
 
+    # Trapezoidal velocity profile fractions (distance-based)
+    ACCEL_FRAC = 0.20  # first 20% of sweep: ramp up
+    DECEL_FRAC = 0.20  # last 20% of sweep: ramp down
+
     def _calc_omega(self):
         if self.continuous_rotation:
             direction = self.direction
@@ -365,14 +369,24 @@ class Phase1Robot:
         max_speed = self.motion.MAX_ANGULAR_SPEED
         min_speed = self.motion.MIN_ANGULAR_SPEED
 
-        # Oscillation: taper speed near sweep ends for smooth reversal
+        # Oscillation: trapezoidal velocity profile for smooth reversals
+        # Cruise speed compensates for ramp phases: v_cruise = v_base * (1 + f_a + f_d)
+        # so overall sweep timing stays equivalent to constant v_base
         if not self.continuous_rotation and self.sweep_angle > 0:
+            cruise = max_speed * (1.0 + self.ACCEL_FRAC + self.DECEL_FRAC)
             frac = self.rotation_progress / self.sweep_angle
-            # Decel zone: last 30% of sweep
-            if frac > 0.7:
-                t = (frac - 0.7) / 0.3  # 0→1 over the decel zone
-                speed = max_speed - t * (max_speed - min_speed)
-                return direction * speed
+
+            if frac < self.ACCEL_FRAC:
+                # Accel phase: v = cruise * sqrt(p / f_a)  (from v²=2αd)
+                speed = cruise * math.sqrt(frac / self.ACCEL_FRAC)
+            elif frac < 1.0 - self.DECEL_FRAC:
+                # Cruise phase
+                speed = cruise
+            else:
+                # Decel phase: v = cruise * sqrt((1-p) / f_d)
+                speed = cruise * math.sqrt((1.0 - frac) / self.DECEL_FRAC)
+
+            return direction * max(speed, min_speed)
 
         return direction * max_speed
 
@@ -420,7 +434,7 @@ class Phase1Controller(Node):
         robots = self.get_parameter("robots").value
         names = [s.strip() for s in robots.split(",") if s.strip()]
 
-        config = {"Moon": ("Moon", 1), "Basin": ("Basin", 1)}
+        config = {"Moon": ("Moon", 1), "Basin": ("Basin", -1)}
 
         self.robots = {}
         scan_topic = self.get_parameter("scan_topic").value
