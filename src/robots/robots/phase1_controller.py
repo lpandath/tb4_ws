@@ -333,47 +333,55 @@ class Phase1Robot:
                     )
                 return
 
-            # Normal motion
+            # Normal motion — publish first, track progress from actual velocity
             sweep_angle = self.sweep_angle
-            omega = self._calc_omega()
-            step = abs(omega) * dt
-            remaining = sweep_angle - self.rotation_progress
-            self.rotation_progress += min(step, remaining)
+            target_omega = self._calc_omega()
+            actual_omega = self._publish(target_omega)
+
+            # Only count progress when actual velocity matches target direction
+            if target_omega * actual_omega > 0:
+                step = abs(actual_omega) * dt
+                remaining = sweep_angle - self.rotation_progress
+                self.rotation_progress += min(step, remaining)
 
             if self.rotation_progress >= sweep_angle:
+                self.completion_count += 1
+                self.rotation_progress = 0.0
                 if self.continuous_rotation:
-                    # Full rotation: reset progress and keep spinning (no pause)
-                    self.completion_count += 1
-                    self.rotation_progress = 0.0
                     self.node.get_logger().info(
                         f"{self.name}: 360° rotation #{self.completion_count} complete, continuing"
                     )
                 else:
-                    # Oscillation: pause and reverse direction
-                    self.rotation_progress = sweep_angle
-                    self.state = MotionState.TURN_AROUND
-                    self._turn_around_until = now + 1.0
-                    self._stop()
                     self.node.get_logger().info(
-                        f"{self.name}: oscillation sweep done, reversing in 1s"
+                        f"{self.name}: oscillation sweep #{self.completion_count}, reversing"
                     )
-                    return
-
-            self._publish(omega)
 
     def _calc_omega(self):
         if self.continuous_rotation:
-            # Continuous spin: always same direction
             direction = self.direction
         else:
-            # Oscillation: alternate direction each sweep
             direction = self.direction if self.completion_count % 2 == 0 else -self.direction
 
-        # Target max speed; acceleration limiter in _publish handles ramp-up
-        return direction * self.motion.MAX_ANGULAR_SPEED
+        max_speed = self.motion.MAX_ANGULAR_SPEED
+        min_speed = self.motion.MIN_ANGULAR_SPEED
+
+        # Oscillation: taper speed near sweep ends for smooth reversal
+        if not self.continuous_rotation and self.sweep_angle > 0:
+            frac = self.rotation_progress / self.sweep_angle
+            # Decel zone: last 30% of sweep
+            if frac > 0.7:
+                t = (frac - 0.7) / 0.3  # 0→1 over the decel zone
+                speed = max_speed - t * (max_speed - min_speed)
+                return direction * speed
+
+        return direction * max_speed
 
     def _publish(self, target):
-        delta = max(-self._max_domega, min(self._max_domega, target - self._last_omega))
+        # Faster acceleration when reversing direction (smooth oscillation fade)
+        domega = self._max_domega
+        if target * self._last_omega < 0:
+            domega *= 4
+        delta = max(-domega, min(domega, target - self._last_omega))
         omega = self._last_omega + delta
         self._last_omega = omega
         msg = Twist()
@@ -382,6 +390,7 @@ class Phase1Robot:
         stamped = TwistStamped()
         stamped.twist.angular.z = omega
         self.cmd_stamped_pub.publish(stamped)
+        return omega
 
     def _stop(self):
         self._last_omega = 0.0
