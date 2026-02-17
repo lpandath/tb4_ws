@@ -74,7 +74,7 @@ def load_parameters(node: Node):
     node.declare_parameter("auto_start", False)
     node.declare_parameter("duty_cycle", False)
     node.declare_parameter("active_duration", 90.0)     # 1.5 min moving
-    node.declare_parameter("rest_duration", 480.0)     # 8 min rest
+    node.declare_parameter("rest_duration", 20.0)     # 8 min rest
 
     motion = MotionProfile(
         ROTATION_ANGLE=node.get_parameter("rotation_angle").value,
