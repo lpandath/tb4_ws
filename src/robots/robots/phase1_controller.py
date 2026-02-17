@@ -365,21 +365,14 @@ class Phase1Robot:
 
     def _calc_omega(self):
         if self.continuous_rotation:
-            # Continuous spin: always same direction, use max speed
+            # Continuous spin: always same direction
             direction = self.direction
         else:
             # Oscillation: alternate direction each sweep
             direction = self.direction if self.completion_count % 2 == 0 else -self.direction
 
-        max_speed = self.motion.MAX_ANGULAR_SPEED
-        min_speed = self.motion.MIN_ANGULAR_SPEED
-        base = self.motion.ROTATION_ANGLE / self.motion.HALF_SWEEP_DURATION
-        raw = direction * base
-
-        if raw > 0:
-            return max(min_speed, min(raw, max_speed))
-        else:
-            return min(-min_speed, max(raw, -max_speed))
+        # Target max speed; acceleration limiter in _publish handles ramp-up
+        return direction * self.motion.MAX_ANGULAR_SPEED
 
     def _publish(self, target):
         delta = max(-self._max_domega, min(self._max_domega, target - self._last_omega))
