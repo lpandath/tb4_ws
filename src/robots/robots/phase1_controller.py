@@ -487,7 +487,7 @@ class Phase1Controller(Node):
                 is_spinning = self._dance_phase == DancePhase.FULL_ROTATION
                 for r in self.robots.values():
                     r.continuous_rotation = is_spinning
-                    r.sweep_angle = math.radians(360) if is_spinning else self.motion.ROTATION_ANGLE
+                    r.sweep_angle = math.radians(360) if is_spinning else self.motion.ROTATION_ANGLE / 4.0
                 ready = sum(1 for r in self.robots.values() if r._scan_count > 0)
                 self.get_logger().info(
                     f"Duty cycle #{self._duty_cycle_count}: ACTIVE {self._dance_phase.name} "
