@@ -89,4 +89,4 @@ cleanup() {
 trap cleanup EXIT
 
 # Run debug monitor in foreground (Ctrl+C will stop it)
-python3 monitor/moon_debug_monitor.py
+uv run --python python3.12 --with-requirements monitor/requirements.txt monitor/moon_debug_monitor.py

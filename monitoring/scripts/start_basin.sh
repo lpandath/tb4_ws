@@ -43,4 +43,4 @@ echo "========================================="
 echo ""
 
 # Run monitor in foreground (Ctrl+C will stop it)
-python3 monitor/basin_monitor.py
+uv run --python python3.12 --with-requirements monitor/requirements.txt monitor/basin_monitor.py

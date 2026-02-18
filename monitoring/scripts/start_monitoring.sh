@@ -44,4 +44,4 @@ echo "========================================="
 echo ""
 
 # Run monitor in foreground (Ctrl+C will stop it)
-python3 monitor/monitor.py
+uv run --python python3.12 --with-requirements monitor/requirements.txt monitor/monitor.py

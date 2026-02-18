@@ -33,6 +33,10 @@ def _launch(context, *args, **kwargs):
                 {"control_rate": 25.0},
                 {"close_stop": 0.80},
                 {"close_resume": 0.90},
+                {"auto_start": True},
+                {"duty_cycle": True},
+                {"active_duration": 90.0},
+                {"rest_duration": 480.0},
             ],
         )
     ]
