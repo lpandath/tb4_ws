@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Phase 1 FULL Launch — one command for exhibition.
-Two-phase dance: continuous spinning ↔ back-and-forth oscillation.
+Continuous full rotation with duty cycle.
 
   ros2 launch robots phase1_full.launch.py robots:=Moon,Basin
   ros2 launch robots phase1_full.launch.py robots:=Moon
@@ -39,6 +39,7 @@ def _launch(context, *args, **kwargs):
                 {"duty_cycle": duty},
                 {"active_duration": 90.0},
                 {"rest_duration": 480.0},
+                {"continuous_rotation": True},
             ],
         )
     ]
