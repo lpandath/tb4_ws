@@ -2,8 +2,7 @@
 """
 PHASE 1: CLOCK MOVEMENT CONTROLLER (ANNUAL CLOCK)
 =================================================
-- Default: continuous full rotation (no drift)
-- Optional oscillation mode (back-and-forth)
+- Robot always swings ~160 degrees back and forth (like a pendulum)
 - Stops ONLY when someone is within 80cm (360° safety detection)
 - Resumes when person moves away beyond 90cm
 """
@@ -70,7 +69,6 @@ def load_parameters(node: Node):
     node.declare_parameter("duty_cycle", False)
     node.declare_parameter("active_duration", 120.0)    # 2 min moving
     node.declare_parameter("rest_duration", 480.0)     # 8 min rest
-    node.declare_parameter("continuous_rotation", True) # True=full circle, False=oscillation
 
     motion = MotionProfile(
         ROTATION_ANGLE=node.get_parameter("rotation_angle").value,
@@ -94,14 +92,11 @@ def load_parameters(node: Node):
 
 class Phase1Robot:
     """
-    Controls ONE robot.
-    continuous_rotation=True: spins continuously (no drift).
-    continuous_rotation=False: oscillates back-and-forth.
-    Stops when 360° lidar detects someone within safety distance.
+    Controls ONE robot. Always swings back and forth.
+    Only stops when 360° lidar detects someone within 50cm.
     """
 
-    def __init__(self, name, namespace, direction, node, motion, safety, scan_topic,
-                 continuous_rotation=True):
+    def __init__(self, name, namespace, direction, node, motion, safety, scan_topic):
         self.name = name
         self.namespace = namespace
         self.direction = direction
@@ -109,7 +104,6 @@ class Phase1Robot:
         self.motion = motion
         self.safety = safety
         self.scan_topic = scan_topic
-        self.continuous_rotation = continuous_rotation
 
         self._lock = threading.RLock()
         self._created_time = time.time()
@@ -209,20 +203,14 @@ class Phase1Robot:
             return
 
         now = time.time()
-        # Collect valid ranges and count how many are below stop threshold
-        close_count = 0
         closest = float("inf")
         for r in msg.ranges:
             if self.safety.LIDAR_MIN_RANGE < r < self.safety.LIDAR_MAX_RANGE:
                 if r < closest:
                     closest = r
-                if r < self.safety.CLOSE_STOP:
-                    close_count += 1
 
         with self._lock:
             self._closest_360 = closest if closest != float("inf") else self.safety.LIDAR_MAX_RANGE
-            # Require at least 3 close points to filter single-point noise
-            self._close_count = close_count
             self._last_scan_time = now
             self._scan_count += 1
 
@@ -236,19 +224,19 @@ class Phase1Robot:
                     f"{self.name}: first scan! closest={self._closest_360:.2f}m"
                 )
 
-            # Emergency stop at 20cm (always immediate)
+            # Emergency stop at 20cm
             if self._closest_360 < self.safety.EMERGENCY_DIST:
                 self._is_close = True
                 self._stop()
                 self._emergency_until = now + 0.3
                 return
 
-            # Hysteresis: stop at 80cm (need 3+ points), resume at 90cm
+            # Hysteresis: stop at 80cm, resume at 90cm
             if self._is_close:
                 if self._closest_360 >= self.safety.CLOSE_RESUME:
                     self._is_close = False
             else:
-                if close_count >= 3:
+                if self._closest_360 < self.safety.CLOSE_STOP:
                     self._is_close = True
 
 
@@ -282,20 +270,12 @@ class Phase1Robot:
             # Periodic status log (every 30s)
             if now - self._last_status_time >= 30.0:
                 self._last_status_time = now
-                if self.continuous_rotation:
-                    direction = "CW" if self.direction > 0 else "CCW"
-                    self.node.get_logger().info(
-                        f"{self.name}: state={self.state.name} mode=FULL_ROTATION "
-                        f"dir={direction} closest={self._closest_360:.2f}m "
-                        f"scans={self._scan_count}"
-                    )
-                else:
-                    direction = "CW" if (self.direction if self.completion_count % 2 == 0 else -self.direction) > 0 else "CCW"
-                    self.node.get_logger().info(
-                        f"{self.name}: state={self.state.name} sweep={self.completion_count} "
-                        f"dir={direction} closest={self._closest_360:.2f}m "
-                        f"scans={self._scan_count}"
-                    )
+                direction = "CW" if (self.direction if self.completion_count % 2 == 0 else -self.direction) > 0 else "CCW"
+                self.node.get_logger().info(
+                    f"{self.name}: state={self.state.name} sweep={self.completion_count} "
+                    f"dir={direction} closest={self._closest_360:.2f}m "
+                    f"scans={self._scan_count}"
+                )
 
             # Emergency cooldown
             if now < self._emergency_until:
@@ -311,32 +291,14 @@ class Phase1Robot:
 
             # Person too close → pause
             if self._is_close:
-                if self.state != MotionState.PAUSED:
-                    self.node.get_logger().info(
-                        f"{self.name}: SAFETY PAUSE — closest={self._closest_360:.2f}m "
-                        f"points={getattr(self, '_close_count', 0)}"
-                    )
                 self._stop()
                 self.state = MotionState.PAUSED
                 self._resume_until = 0.0  # Reset so next resume gets fresh delay
                 return
 
-            # Resume from pause — soft start with 0.3s delay
+            # Resume from pause — no delay, _publish handles smooth ramp-up
             if self.state in (MotionState.IDLE, MotionState.PAUSED):
-                if self._resume_until == 0.0:
-                    self._resume_until = now + 0.3
-                if now < self._resume_until:
-                    return  # Wait before moving
-                self._resume_until = 0.0
                 self.state = MotionState.MOVING
-
-            # Continuous rotation: just keep spinning, no reversal
-            if self.continuous_rotation:
-                omega = self._calc_omega()
-                self._publish(omega)
-                return
-
-            # --- Oscillation mode below ---
 
             # Turn around pause between sweeps
             if self.state == MotionState.TURN_AROUND:
@@ -349,7 +311,7 @@ class Phase1Robot:
                     )
                 return
 
-            # Normal oscillation motion
+            # Normal motion
             omega = self._calc_omega()
             step = abs(omega) * dt
             remaining = self.motion.ROTATION_ANGLE - self.rotation_progress
@@ -368,11 +330,6 @@ class Phase1Robot:
             self._publish(omega)
 
     def _calc_omega(self):
-        if self.continuous_rotation:
-            # Continuous: constant speed in one direction
-            return self.direction * self.motion.MAX_ANGULAR_SPEED
-
-        # Oscillation: alternate direction each sweep
         base = self.motion.ROTATION_ANGLE / self.motion.HALF_SWEEP_DURATION
         direction = self.direction if self.completion_count % 2 == 0 else -self.direction
         raw = direction * base
@@ -427,20 +384,17 @@ class Phase1Controller(Node):
 
         config = {"Moon": ("Moon", 1), "Basin": ("Basin", -1)}
 
-        self.continuous_rotation = self.get_parameter("continuous_rotation").value
         self.robots = {}
         scan_topic = self.get_parameter("scan_topic").value
         for name in names:
             ns, direction = config[name]
             self.robots[name] = Phase1Robot(
                 name, ns, direction, self,
-                self.motion, self.safety, scan_topic,
-                continuous_rotation=self.continuous_rotation,
+                self.motion, self.safety, scan_topic
             )
-            mode = "FULL ROTATION" if self.continuous_rotation else "OSCILLATION"
             self.get_logger().info(
                 f"  Robot '{name}': ns={ns}, dir={'CW' if direction > 0 else 'CCW'}, "
-                f"mode={mode}, scan=/{ns}/{scan_topic}"
+                f"scan=/{ns}/{scan_topic}"
             )
 
         self.rotating = False
@@ -482,7 +436,6 @@ class Phase1Controller(Node):
                 r.start_lidar()
 
         elif self._duty_state == "starting":
-            # Retry start_lidar every 10s if no scans yet
             elapsed = now - self._duty_timer
             if elapsed > 0 and int(elapsed) % 10 == 0 and int(elapsed) != getattr(self, '_last_lidar_retry', -1):
                 self._last_lidar_retry = int(elapsed)
@@ -584,4 +537,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
