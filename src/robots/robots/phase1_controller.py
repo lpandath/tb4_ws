@@ -69,6 +69,7 @@ def load_parameters(node: Node):
     node.declare_parameter("duty_cycle", False)
     node.declare_parameter("active_duration", 120.0)    # 2 min moving
     node.declare_parameter("rest_duration", 480.0)     # 8 min rest
+    node.declare_parameter("stop_on_scan_loss", True)   # Stop robot when lidar data lost
 
     motion = MotionProfile(
         ROTATION_ANGLE=node.get_parameter("rotation_angle").value,
@@ -96,7 +97,8 @@ class Phase1Robot:
     Only stops when 360° lidar detects someone within 50cm.
     """
 
-    def __init__(self, name, namespace, direction, node, motion, safety, scan_topic):
+    def __init__(self, name, namespace, direction, node, motion, safety, scan_topic,
+                 stop_on_scan_loss=True):
         self.name = name
         self.namespace = namespace
         self.direction = direction
@@ -104,6 +106,7 @@ class Phase1Robot:
         self.motion = motion
         self.safety = safety
         self.scan_topic = scan_topic
+        self.stop_on_scan_loss = stop_on_scan_loss
 
         self._lock = threading.RLock()
         self._created_time = time.time()
@@ -253,8 +256,9 @@ class Phase1Robot:
                 if not self._scan_lost:
                     self._scan_lost = True
                     self._scan_lost_time = now
-                    self.node.get_logger().error(
-                        f"{self.name}: NO SCAN DATA for {SCAN_TIMEOUT}s! Stopping for safety."
+                    self.node.get_logger().warn(
+                        f"{self.name}: NO SCAN DATA for {SCAN_TIMEOUT}s!"
+                        + (" Stopping for safety." if self.stop_on_scan_loss else " Continuing (stop_on_scan_loss=false).")
                     )
                 # Auto-recovery: re-subscribe every SCAN_RESUBSCRIBE seconds
                 if now - self._scan_lost_time >= SCAN_RESUBSCRIBE and now - self._last_resubscribe >= SCAN_RESUBSCRIBE:
@@ -263,9 +267,10 @@ class Phase1Robot:
                         f"{self.name}: re-creating scan subscription (DDS recovery)..."
                     )
                     self._subscribe_scan()
-                self._stop()
-                self.state = MotionState.PAUSED
-                return
+                if self.stop_on_scan_loss:
+                    self._stop()
+                    self.state = MotionState.PAUSED
+                    return
 
             # Periodic status log (every 30s)
             if now - self._last_status_time >= 30.0:
@@ -300,17 +305,6 @@ class Phase1Robot:
             if self.state in (MotionState.IDLE, MotionState.PAUSED):
                 self.state = MotionState.MOVING
 
-            # Turn around pause between sweeps
-            if self.state == MotionState.TURN_AROUND:
-                if now >= self._turn_around_until:
-                    self.completion_count += 1
-                    self.rotation_progress = 0.0
-                    self.state = MotionState.MOVING
-                    self.node.get_logger().info(
-                        f"{self.name}: sweep {self.completion_count} starting"
-                    )
-                return
-
             # Normal motion
             omega = self._calc_omega()
             step = abs(omega) * dt
@@ -318,12 +312,10 @@ class Phase1Robot:
             self.rotation_progress += min(step, remaining)
 
             if self.rotation_progress >= self.motion.ROTATION_ANGLE:
-                self.rotation_progress = self.motion.ROTATION_ANGLE
-                self.state = MotionState.TURN_AROUND
-                self._turn_around_until = now + 1.0
-                self._stop()
+                self.completion_count += 1
+                self.rotation_progress = 0.0
                 self.node.get_logger().info(
-                    f"{self.name}: sweep done, reversing in 1s"
+                    f"{self.name}: sweep {self.completion_count} reversing"
                 )
                 return
 
@@ -386,11 +378,13 @@ class Phase1Controller(Node):
 
         self.robots = {}
         scan_topic = self.get_parameter("scan_topic").value
+        stop_on_scan_loss = self.get_parameter("stop_on_scan_loss").value
         for name in names:
             ns, direction = config[name]
             self.robots[name] = Phase1Robot(
                 name, ns, direction, self,
-                self.motion, self.safety, scan_topic
+                self.motion, self.safety, scan_topic,
+                stop_on_scan_loss=stop_on_scan_loss,
             )
             self.get_logger().info(
                 f"  Robot '{name}': ns={ns}, dir={'CW' if direction > 0 else 'CCW'}, "

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Web control panel for phase1 systemd service.
+"""Web control panel for phase1 systemd services (Exhibition & Power Save).
 
 Standalone HTTP server (stdlib only) that lets staff enable/disable
-the phase1 service from any phone on the TinyDancer WiFi network.
+the phase1 or phase1-save service from any phone on the TinyDancer WiFi network.
 
 Endpoints:
-    GET  /        — HTML control page
-    GET  /status  — JSON { "active": bool, "enabled": bool }
-    POST /start   — systemctl start phase1
-    POST /stop    — systemctl stop phase1
+    GET  /            — HTML control page
+    GET  /status      — JSON { "exhibition": state, "powersave": state }
+    POST /start-exhibition  — start phase1, stop phase1-save
+    POST /start-powersave   — start phase1-save, stop phase1
+    POST /stop              — stop whichever is active
 """
 
 import json
@@ -18,7 +19,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
 PORT = 8090
-SERVICE = "phase1"
+SVC_EXHIBITION = "phase1"
+SVC_POWERSAVE = "phase1-save"
 
 
 def get_robot_name():
@@ -34,28 +36,35 @@ def get_robot_name():
     return socket.gethostname()
 
 
-def service_state():
+def _svc_state(service):
     """Return systemd state: 'active', 'activating', 'deactivating', 'inactive', etc."""
     result = subprocess.run(
-        ["systemctl", "is-active", SERVICE],
+        ["systemctl", "is-active", service],
         capture_output=True, text=True, timeout=10,
     )
     return result.stdout.strip()
 
 
-def service_start():
-    """Fire and forget — Popen returns immediately."""
-    subprocess.Popen(["systemctl", "start", SERVICE],
+def _ui_state(raw):
+    if raw == "activating":
+        return "starting"
+    elif raw == "deactivating":
+        return "stopping"
+    elif raw == "active":
+        return "running"
+    return "stopped"
+
+
+def _start(service):
+    subprocess.Popen(["systemctl", "start", service],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def service_stop():
-    """Fire and forget — Popen returns immediately."""
-    subprocess.Popen(["systemctl", "stop", SERVICE],
+def _stop(service):
+    subprocess.Popen(["systemctl", "stop", service],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-# Uses the same CSS variables and visual style as the existing dashboard
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -75,7 +84,8 @@ HTML_PAGE = """<!DOCTYPE html>
     --bad: #ef4444;
     --shadow: rgba(80, 40, 120, 0.12);
     --btn-bg: #c4b5d4;
-    --btn-active: #4c1d95;
+    --purple: #4c1d95;
+    --brown: #6d4c2a;
 }}
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 body {{
@@ -97,31 +107,46 @@ h1 {{
     margin-bottom: 2rem;
     font-size: 0.9rem;
 }}
+.cards {{
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    width: 100%;
+    max-width: 420px;
+}}
 .card {{
     background: var(--card);
-    border: 1px solid var(--border);
+    border: 2px solid var(--border);
     border-radius: 16px;
-    padding: 2rem;
+    padding: 1.5rem;
     box-shadow: 0 12px 26px var(--shadow);
-    width: 100%;
-    max-width: 400px;
     text-align: center;
+    transition: border-color 0.3s;
 }}
-.status-label {{
-    font-size: 0.85rem;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    margin-bottom: 0.5rem;
+.card.active-exhibition {{
+    border-color: var(--purple);
 }}
-.status-indicator {{
-    font-size: 1.5rem;
+.card.active-powersave {{
+    border-color: var(--brown);
+}}
+.card-title {{
+    font-size: 1.15rem;
     font-weight: 700;
-    margin-bottom: 2rem;
+    margin-bottom: 0.15rem;
+}}
+.card-desc {{
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin-bottom: 1rem;
+}}
+.status-row {{
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 0.5rem;
+    margin-bottom: 1rem;
+    font-size: 1.1rem;
+    font-weight: 600;
 }}
 .dot {{
     width: 12px;
@@ -144,42 +169,20 @@ h1 {{
     0%, 100% {{ opacity: 1; }}
     50% {{ opacity: 0.4; }}
 }}
-.buttons {{
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-}}
 button {{
     font-family: inherit;
-    font-size: 1.25rem;
+    font-size: 1.1rem;
     font-weight: 600;
-    padding: 1rem 2rem;
+    padding: 0.85rem 1.5rem;
     border: 1px solid var(--border);
     border-radius: 12px;
     cursor: pointer;
-    color: var(--text);
+    color: #fff;
     transition: border-color 0.2s, transform 0.1s;
-    min-height: 60px;
+    min-height: 52px;
+    width: 100%;
 }}
 button:active {{ transform: scale(0.97); }}
-.btn-enable {{
-    background: var(--btn-active);
-    border-color: var(--btn-active);
-    color: #fff;
-}}
-.btn-enable:hover:enabled {{
-    background: #5b21b6;
-    border-color: #5b21b6;
-}}
-.btn-disable {{
-    background: var(--btn-active);
-    border-color: var(--btn-active);
-    color: #fff;
-}}
-.btn-disable:hover:enabled {{
-    background: #5b21b6;
-    border-color: #5b21b6;
-}}
 button:disabled {{
     background: var(--btn-bg);
     border-color: var(--border);
@@ -188,11 +191,34 @@ button:disabled {{
     cursor: not-allowed;
     transform: none;
 }}
+.btn-exhibition {{
+    background: var(--purple);
+    border-color: var(--purple);
+}}
+.btn-exhibition:hover:enabled {{
+    background: #5b21b6;
+}}
+.btn-powersave {{
+    background: var(--brown);
+    border-color: var(--brown);
+}}
+.btn-powersave:hover:enabled {{
+    background: #7a5530;
+}}
+.btn-disable {{
+    background: var(--bad);
+    border-color: var(--bad);
+    margin-top: 0.5rem;
+}}
+.btn-disable:hover:enabled {{
+    background: #dc2626;
+}}
 .error {{
     color: var(--bad);
     margin-top: 1rem;
     font-size: 0.9rem;
     min-height: 1.2em;
+    text-align: center;
 }}
 
 /* Confirmation overlay */
@@ -245,18 +271,40 @@ button:disabled {{
 <h1>{robot_name}</h1>
 <p class="subtitle">Phase 1 Service Control</p>
 
-<div class="card">
-    <div class="status-label">Service Status</div>
-    <div class="status-indicator">
-        <span class="dot" id="dot"></span>
-        <span id="status-text">Checking...</span>
+<div class="cards">
+    <!-- Exhibition card -->
+    <div class="card" id="card-exhibition">
+        <div class="card-title">Exhibition Mode</div>
+        <div class="card-desc">1.5 min active / 7 min rest</div>
+        <div class="status-row">
+            <span class="dot" id="dot-exhibition"></span>
+            <span id="status-exhibition">Checking...</span>
+        </div>
+        <button class="btn-exhibition" id="btn-exhibition" onclick="confirmAction('start-exhibition')">
+            Enable
+        </button>
     </div>
-    <div class="buttons">
-        <button class="btn-enable" id="btn-enable" onclick="confirmAction('start')">Enable</button>
-        <button class="btn-disable" id="btn-disable" onclick="confirmAction('stop')">Disable</button>
+
+    <!-- Power Save card -->
+    <div class="card" id="card-powersave">
+        <div class="card-title">Power Save Mode</div>
+        <div class="card-desc">1 min active / 12 min rest</div>
+        <div class="status-row">
+            <span class="dot" id="dot-powersave"></span>
+            <span id="status-powersave">Checking...</span>
+        </div>
+        <button class="btn-powersave" id="btn-powersave" onclick="confirmAction('start-powersave')">
+            Enable Save
+        </button>
     </div>
-    <div class="error" id="error"></div>
+
+    <!-- Shared disable -->
+    <button class="btn-disable" id="btn-disable" onclick="confirmAction('stop')">
+        Disable
+    </button>
 </div>
+
+<div class="error" id="error"></div>
 
 <!-- Confirmation dialog -->
 <div class="overlay" id="overlay">
@@ -272,14 +320,20 @@ button:disabled {{
 <script>
 let pendingAction = null;
 
+const LABELS = {{
+    'start-exhibition': {{ verb: 'enable Exhibition', btnClass: 'btn-exhibition' }},
+    'start-powersave':  {{ verb: 'enable Save mode', btnClass: 'btn-powersave' }},
+    'stop':             {{ verb: 'disable the active service', btnClass: 'btn-disable' }},
+}};
+
 function confirmAction(action) {{
     pendingAction = action;
-    const verb = action === 'start' ? 'enable' : 'disable';
+    const info = LABELS[action];
     document.getElementById('confirm-msg').textContent =
-        'Are you sure you want to ' + verb + ' the phase1 service?';
+        'Are you sure you want to ' + info.verb + '?';
     const btn = document.getElementById('confirm-btn');
-    btn.textContent = verb.charAt(0).toUpperCase() + verb.slice(1);
-    btn.className = action === 'start' ? 'btn-enable' : 'btn-disable';
+    btn.textContent = 'Confirm';
+    btn.className = info.btnClass;
     document.getElementById('overlay').classList.add('visible');
 }}
 
@@ -288,27 +342,45 @@ function hideDialog() {{
     pendingAction = null;
 }}
 
+function disableAll() {{
+    document.getElementById('btn-exhibition').disabled = true;
+    document.getElementById('btn-powersave').disabled = true;
+    document.getElementById('btn-disable').disabled = true;
+}}
+
 async function doAction() {{
     const action = pendingAction;
     hideDialog();
     if (!action) return;
     document.getElementById('error').textContent = '';
+    disableAll();
+
     // Immediate visual feedback
-    const dot = document.getElementById('dot');
-    const text = document.getElementById('status-text');
-    document.getElementById('btn-enable').disabled = true;
-    document.getElementById('btn-disable').disabled = true;
-    if (action === 'start') {{
-        dot.className = 'dot starting';
-        text.textContent = 'Starting...';
+    if (action === 'start-exhibition') {{
+        document.getElementById('dot-exhibition').className = 'dot starting';
+        document.getElementById('status-exhibition').textContent = 'Starting...';
+        document.getElementById('dot-powersave').className = 'dot';
+        document.getElementById('status-powersave').textContent = 'Stopping...';
+    }} else if (action === 'start-powersave') {{
+        document.getElementById('dot-powersave').className = 'dot starting';
+        document.getElementById('status-powersave').textContent = 'Starting...';
+        document.getElementById('dot-exhibition').className = 'dot';
+        document.getElementById('status-exhibition').textContent = 'Stopping...';
     }} else {{
-        dot.className = 'dot';
-        text.textContent = 'Stopping...';
+        document.getElementById('dot-exhibition').className = 'dot';
+        document.getElementById('status-exhibition').textContent = 'Stopping...';
+        document.getElementById('dot-powersave').className = 'dot';
+        document.getElementById('status-powersave').textContent = 'Stopping...';
     }}
+
     try {{
         await fetch('/' + action, {{ method: 'POST' }});
     }} catch (e) {{
         document.getElementById('error').textContent = 'Connection error';
+        // Re-enable all buttons so the user is never stuck
+        document.getElementById('btn-exhibition').disabled = false;
+        document.getElementById('btn-powersave').disabled = false;
+        document.getElementById('btn-disable').disabled = false;
     }}
 }}
 
@@ -316,39 +388,49 @@ async function refreshStatus() {{
     try {{
         const resp = await fetch('/status');
         const data = await resp.json();
-        const dot = document.getElementById('dot');
-        const text = document.getElementById('status-text');
-        const btnEn = document.getElementById('btn-enable');
-        const btnDis = document.getElementById('btn-disable');
+        const exh = data.exhibition;
+        const ps  = data.powersave;
 
-        if (data.state === 'running') {{
-            dot.className = 'dot running';
-            text.textContent = 'Running';
-            btnEn.disabled = true;
-            btnDis.disabled = false;
-        }} else if (data.state === 'starting') {{
-            dot.className = 'dot starting';
-            text.textContent = 'Starting...';
-            btnEn.disabled = true;
-            btnDis.disabled = true;
-        }} else if (data.state === 'stopping') {{
-            dot.className = 'dot';
-            text.textContent = 'Stopping...';
-            btnEn.disabled = true;
-            btnDis.disabled = true;
-        }} else {{
-            dot.className = 'dot';
-            text.textContent = 'Stopped';
-            btnEn.disabled = false;
-            btnDis.disabled = true;
-        }}
+        // Exhibition dot/text
+        const dotE = document.getElementById('dot-exhibition');
+        const txtE = document.getElementById('status-exhibition');
+        const cardE = document.getElementById('card-exhibition');
+        if (exh === 'running')       {{ dotE.className = 'dot running';  txtE.textContent = 'Running'; }}
+        else if (exh === 'starting') {{ dotE.className = 'dot starting'; txtE.textContent = 'Starting...'; }}
+        else if (exh === 'stopping') {{ dotE.className = 'dot';          txtE.textContent = 'Stopping...'; }}
+        else                         {{ dotE.className = 'dot';          txtE.textContent = 'Stopped'; }}
+
+        // Power Save dot/text
+        const dotP = document.getElementById('dot-powersave');
+        const txtP = document.getElementById('status-powersave');
+        const cardP = document.getElementById('card-powersave');
+        if (ps === 'running')       {{ dotP.className = 'dot running';  txtP.textContent = 'Running'; }}
+        else if (ps === 'starting') {{ dotP.className = 'dot starting'; txtP.textContent = 'Starting...'; }}
+        else if (ps === 'stopping') {{ dotP.className = 'dot';          txtP.textContent = 'Stopping...'; }}
+        else                        {{ dotP.className = 'dot';          txtP.textContent = 'Stopped'; }}
+
+        // Active card highlight
+        cardE.className = exh === 'running' || exh === 'starting' ? 'card active-exhibition' : 'card';
+        cardP.className = ps  === 'running' || ps  === 'starting' ? 'card active-powersave'  : 'card';
+
+        // Button states — each button only cares about its own service
+        const anyActive = (exh !== 'stopped' || ps !== 'stopped');
+
+        document.getElementById('btn-exhibition').disabled = (exh !== 'stopped');
+        document.getElementById('btn-powersave').disabled  = (ps  !== 'stopped');
+        // Disable button is ALWAYS available when anything is non-stopped
+        document.getElementById('btn-disable').disabled    = !anyActive;
+
         document.getElementById('error').textContent = '';
     }} catch (e) {{
         document.getElementById('error').textContent = 'Connection lost';
+        // Re-enable all buttons so the user is never stuck
+        document.getElementById('btn-exhibition').disabled = false;
+        document.getElementById('btn-powersave').disabled = false;
+        document.getElementById('btn-disable').disabled = false;
     }}
 }}
 
-// Initial load + auto-refresh every 3 seconds
 refreshStatus();
 setInterval(refreshStatus, 3000);
 </script>
@@ -362,29 +444,28 @@ class Handler(BaseHTTPRequestHandler):
             html = HTML_PAGE.format(robot_name=get_robot_name())
             self._respond(200, "text/html", html.encode())
         elif self.path == "/status":
-            state = service_state()
-            if state == "activating":
-                ui_state = "starting"
-            elif state == "deactivating":
-                ui_state = "stopping"
-            elif state == "active":
-                ui_state = "running"
-            else:
-                ui_state = "stopped"
+            exh_state = _ui_state(_svc_state(SVC_EXHIBITION))
+            ps_state = _ui_state(_svc_state(SVC_POWERSAVE))
             self._respond(
                 200,
                 "application/json",
-                json.dumps({"state": ui_state}).encode(),
+                json.dumps({"exhibition": exh_state, "powersave": ps_state}).encode(),
             )
         else:
             self._respond(404, "text/plain", b"Not Found")
 
     def do_POST(self):
-        if self.path == "/start":
-            service_start()
+        if self.path == "/start-exhibition":
+            _stop(SVC_POWERSAVE)
+            _start(SVC_EXHIBITION)
+            self._respond(200, "application/json", json.dumps({"ok": True}).encode())
+        elif self.path == "/start-powersave":
+            _stop(SVC_EXHIBITION)
+            _start(SVC_POWERSAVE)
             self._respond(200, "application/json", json.dumps({"ok": True}).encode())
         elif self.path == "/stop":
-            service_stop()
+            _stop(SVC_EXHIBITION)
+            _stop(SVC_POWERSAVE)
             self._respond(200, "application/json", json.dumps({"ok": True}).encode())
         else:
             self._respond(404, "text/plain", b"Not Found")

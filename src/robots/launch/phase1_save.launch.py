@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Phase 1 FULL Launch — one command for exhibition.
+Phase 1 POWER-SAVE Launch — longer rest periods for battery conservation.
 Subscribes to /scan directly (no scan correctors needed). Auto-starts.
 
-  ros2 launch robots phase1_full.launch.py robots:=Moon
-  ros2 launch robots phase1_full.launch.py robots:=Moon,Basin
-  ros2 launch robots phase1_full.launch.py robots:=Basin duty_cycle:=true
+  ros2 launch robots phase1_save.launch.py robots:=Moon
+  ros2 launch robots phase1_save.launch.py robots:=Moon,Basin
+  ros2 launch robots phase1_save.launch.py robots:=Basin duty_cycle:=true
 """
 
 from launch import LaunchDescription
@@ -38,8 +38,8 @@ def _launch(context, *args, **kwargs):
                 {"close_resume": 0.90},
                 {"auto_start": True},
                 {"duty_cycle": duty},
-                {"active_duration": 90.0},
-                {"rest_duration": 420.0},
+                {"active_duration": 60.0},
+                {"rest_duration": 720.0},
                 {"stop_on_scan_loss": False},
             ],
         )
